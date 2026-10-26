@@ -1,0 +1,31 @@
+#######################################################################################
+# Polarised spectrum synthesis for active-Sun analogue
+#######################################################################################
+
+# starting wavelength, ending wavelength, step size in km/s, ln(lambda) sampling
+wave=5000, 5200, 0.3, 1
+
+# output files: save intensity spectra (full Stokes)
+save=0, 0, 0, 1, 0
+
+# line lists
+lines=
+#
+# standard hydrogen line list
+-1               ../lines/VALD_H1_10-10000.h5
+#
+# atomic lines from VALD; produced from VALD "extract all" with
+#   vald2hdf.py VALD_all_500-600.dat.gz --zeeman
+-1               ../lines/VALD_all_500-600.zh5
+
+# MARCS model atmosphere in krz format
+model=../models/sun.krz
+
+# 3kG magnetic field in stellar reference frame
+bfield=3000, 0, 0
+
+# calculate intensity at 7 mu angles
+mus=7
+
+# convolve with vsini=5 km/s, vmac=3.0 km/s, resolving power R=120000
+#convol=5, 3.0, 120000

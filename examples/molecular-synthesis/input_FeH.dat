@@ -1,0 +1,28 @@
+#######################################################################################
+# Spectrum synthesis of FeH at near-IR wavelengths (950-1100 nm) for an M dwarf
+#######################################################################################
+
+# starting wavelength, ending wavelength, step size in km/s, ln(lambda) sampling
+wave=9500, 11000, 0.3, 1
+
+# output files: save disk-integrated flux
+save=0, 0, 0, 0, 1
+
+# line lists
+lines=
+#
+# standard hydrogen line list
+-1               ../lines/VALD_H1_10-10000.h5
+#
+# FeH from Exomol; produced with 
+#   mol2hdf.py 56Fe1H_Exomol_Irw.vac.gz FeH -wmin 9000 -wmax 16000
+0126.001056      ../lines/56Fe1H_Exomol_Irw.h5
+
+# MARCS model atmosphere in krz format
+model=../models/t3500g5.0v0_pp.krz
+
+# calculate intensity at 7 mu angles
+mus=7
+
+# convolve with vsini=2 km/s, no macrotubulence, resolving power R=65000
+convol=2.0, 0, 65000

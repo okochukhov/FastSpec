@@ -1,0 +1,31 @@
+#######################################################################################
+# Spectrum synthesis of atomic lines in the solar spectrum
+#######################################################################################
+
+# starting wavelength, ending wavelength, step size in km/s, ln(lambda) sampling
+wave=5000, 6000, 0.3, 1
+
+# output files: save line strengths, disk-integrated flux
+save=1, 0, 0, 0, 1
+
+# line lists
+lines=
+#
+# standard hydrogen line list
+-1               ../lines/VALD_H1_10-10000.h5
+#
+# atomic lines from VALD; produced from VALD "extract all" with
+#   vald2hdf.py VALD_all_500-600.dat.gz
+-1               ../lines/VALD_all_500-600.h5
+
+# MARCS model atmosphere in krz format
+model=../models/sun.krz
+
+# change abundance of Cr and Fe
+abundance=Cr:-6.41, Fe:-4.57
+
+# calculate intensity at 7 mu angles
+mus=7
+
+# convolve with vsini=1.9 km/s, vmac=3.0 km/s, resolving power R=120000
+convol=1.9, 3.0, 120000
