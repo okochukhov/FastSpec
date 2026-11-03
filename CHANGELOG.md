@@ -1,6 +1,6 @@
 # Changelog
 
-## code version 3.3
+## release 1.1 - code version 3.3 - 2026-11-03
 
 ### Added
 
