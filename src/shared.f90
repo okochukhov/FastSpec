@@ -118,13 +118,15 @@ MODULE Config
   REAL(8) :: LimitRAM = 16d0           ! RAM limit in GB for large arrays
   REAL(8) :: EpsOpac = 1d-4            ! line opacity inclusion parameter
   REAL(8) :: VWfudge = 1d0             ! scaling of Unsold van der Waals broadening
-  INTEGER :: Verbose = 1               ! verbosity level
-  LOGICAL :: H2Brd = .FALSE.           ! include H2 contribution to van der Waals broadening
+  REAL(8) :: H2Brd = 0d0               ! scaling of H2 contribution to van der Waals broadening
+  REAL(8) :: VWmol = 0d0               ! van der Waals constant for all molecular lines
   LOGICAL :: MolBrd = .FALSE.          ! apply van der Waals and Stark broadening to molecular lines if present in the line list
   LOGICAL :: BfKurucz = .TRUE.         ! use ATLAS/Kurucz H bound-free cross section or MARCS implementation
   INTEGER :: Bframe = 0                ! magnetic field reference frame
   INTEGER :: Hprof = 2                 ! H bound-bound opacity treatment
-  
+  LOGICAL :: Hydrostat = .FALSE.       ! re-solve the hydrostatic structure for abundances differing from the model atmosphere
+  INTEGER :: Verbose = 1               ! verbosity level
+
   ! parameters for opacity window determination
   REAL(8), PARAMETER :: DWstart = 0.2d0, DWstep = 2d0, Dwide = 5d3
   
@@ -132,8 +134,9 @@ MODULE Config
   INTEGER, PARAMETER :: Maxspl = 650
   INTEGER, PARAMETER :: Maxion = 5
   
-  ! default number of mu angles for radiative transfer
-  INTEGER :: Nmu = 7
+  ! disk-integration parameters
+  INTEGER :: Nmu = 7                   ! default number of mu angles for radiative transfer
+  INTEGER :: DiskQuad = 1              ! disk-integration quadrature (0 = equal-area annuli, 1 = Gauss-Legendre, 2 = Gauss-Radau with a node at mu = 1);
   REAL(8), ALLOCATABLE :: Xmu(:), Wmu(:)
   
   ! polarised spectrum synthesis; set in Init when a magnetic line list is present
@@ -224,7 +227,7 @@ MODULE AtmosData
   REAL(4) :: Teff, Grav
   REAL(8) :: Radius = -1d0
   REAL(4), ALLOCATABLE :: Fraction(:,:), FractionPF(:,:), PartFunc(:,:)
-  REAL(8) :: Wlstd, Abund(99)
+  REAL(8) :: Wlstd, Abund(99), AbundModel(99)
   REAL(8) :: Vmicro = 0d0, Vmacro = 0d0, Vsini = 0d0, Vgau = 0d0
   REAL(8), ALLOCATABLE :: Bfield(:)
   LOGICAL :: BfieldSet = .FALSE.

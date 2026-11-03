@@ -45,6 +45,9 @@
 !     and optional keywords
 !       MUS       = number of mu angles, or an explicit list of mu values (recognised by a
 !                   decimal point; the list may be continued over several lines)
+!       DISKQUAD  = 0/1/2 disk-integration quadrature: 0 = equal-area annuli, 1 = Gauss-Legendre
+!                   (default), 2 = Gauss-Radau with a node at mu = 1; an explicit MUS list of
+!                   more than one value requires 0
 !       VMIC      = microturbulent velocity (km/s)
 !       CONVOL    = Vsini (km/s), Vmacro (km/s), Vgau (km/s or resolving power if > 1000)
 !       BFIELD    = magnetic field vector (G); three numbers for BFRAME 0 or 1, or
@@ -60,15 +63,20 @@
 !       LIMITRAM  = RAM limit (GB) for large arrays
 !       EPSOPAC   = line-to-continuum opacity threshold for including lines
 !       VWFUDGE   = scaling factor of Unsold van der Waals broadening
-!       H2BRD     = 0/1 flag: include H2 contribution to van der Waals broadening
+!       H2BRD     = scaling factor (0 to 10) of H2 contribution to van der Waals broadening
 !       MOLBRD    = 0/1 flag: apply Stark and van der Waals broadening to molecules if these
 !                   broadening constants are provided in the input line list
+!       VWMOL     = van der Waals broadening constant for all molecular lines (logarithmic if
+!                   negative, linear if positive); a non-zero value applies it with or without MOLBRD
 !       BFKURUCZ  = 0/1 flag: MARCS or ATLAS hydrogen bound-free cross sections as part of
 !                   hydrogen line opacity calculation with the occupation probability formalism
 !       HPROF     = 0/1/2/3 Stark profiles of hydrogen lines: 0 = original HLINOP; 1 = corrected
 !                   HLINOP; 2 = Lemke (1997) tables where available, otherwise corrected HLINOP
 !                   (default); 3 = Stehle & Hutcheon (1999) tables, then Lemke, then corrected
 !                   HLINOP. Lyman alpha always uses the original HLINOP
+!       HYDROSTAT = 0/1 flag: re-solve the hydrostatic structure when the abundances differ from
+!                   those of the model atmosphere, keeping T(tau) at the standard wavelength
+!                   (plane-parallel column-mass models only)
 !
 !  2. Model atmosphere in .krz (Kurucz) format: Teff, logg, model type, standard
 !     wavelength, opacity flags, element abundances and the depth-dependent structure
@@ -100,8 +108,9 @@
 !   1. calculate synthetic intensity or Stokes parameter synthetic spectra:
 !   fastspec <input_parameter_file>
 !
-!   2. post-processes a previously computed intensity spectrum file (fs_spec.bin), applying 
-!   disk integration and convolution with the given parameters:
+!   2. post-processes a previously computed intensity spectrum file (fs_spec.bin), applying
+!   disk integration and convolution with the given parameters (the disk-integration
+!   quadrature is identified from the mu values stored in the file):
 !   fastspec <intensity_file> <Vsini> <Vmacro> <Vgau|R>
 !
 ! =============================================================================================
@@ -244,7 +253,13 @@ PROGRAM FastSpec
   WRITE(*, '(A)') TRIM(Msg)
 
   ! Initialization of wavelength grid and related arrays, list of species, solving EOS
-  IF (Verbose >= 1) WRITE(*, '(A)', ADVANCE='NO') ' Initialising and solving EOS :: '
+  IF (Verbose >= 1) THEN
+    IF (HydroActive()) THEN
+      WRITE(*, '(A)', ADVANCE='NO') ' Initialising and solving EOS iteratively with hydrostatic structure :: '
+    ELSE
+      WRITE(*, '(A)', ADVANCE='NO') ' Initialising and solving EOS :: '
+    END IF
+  END IF
 
   ! Start timer
   CPUtotal = MDtime(CPUtime)

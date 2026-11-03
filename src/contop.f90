@@ -15,7 +15,8 @@
 !   HEMIOP   He- free-free
 !   HERAOP   Rayleigh scattering by He I
 !   COOLOP   C I, Mg I, Al I, Si I and Fe I bound-free, CH and OH bound-free and
-!            photodissociation, H2-H2 and H2-He collision-induced absorption
+!            photodissociation, H2-H2, H2-He and H2-H collision-induced absorption,
+!            H2- free-free
 !   LUKEOP   C II, Mg II, Si II, N I, O I and Ca II bound-free
 !   HOTOP    bound-free of selected C II-IV, N II-V, O II-VI and Ne I-VI levels,
 !            free-free of the first five ions of C, N, O, Ne, Mg, Si, S and Fe
@@ -31,7 +32,8 @@ MODULE Contop
 
   USE Constants
   USE AtmosData
-  
+  USE CiaData
+
   IMPLICIT NONE
 
   REAL(8), PARAMETER :: Clight = Vc * 1d13    ! speed of light in Ang/s
@@ -49,7 +51,7 @@ MODULE Contop
 
   ! Temperature-dependent quantities precomputed once per model atmosphere by ContopInit:
   ! hc/kT, level Boltzmann factors and excitation/ionization factors for HE1OP and the 
-  ! COOLOP/LUKEOP member routines, the logarithm of the H- free-free table and the 
+  ! COOLOP/LUKEOP member routines, the logarithms of the H- and H2- free-free tables and the
   ! ionization populations used by HOTOP
   REAL(8), ALLOCATABLE :: Hckt(:)
   REAL(8), ALLOCATABLE :: BoltHe1(:,:), BoltnHe1(:,:), BoltexHe1(:), ExlimHe1(:), FreetHe1(:)
@@ -60,7 +62,8 @@ MODULE Contop
   REAL(8), ALLOCATABLE :: BoltH(:,:), BoltexH(:), ExlimH(:), FreetH(:)
   REAL(8), ALLOCATABLE :: BoltHe2(:,:), BoltexHe2(:), ExlimHe2(:), FreetHe2(:)
   REAL(8), ALLOCATABLE :: HotexpTkev(:,:)
-  REAL(8) :: HmWfflog(22), HmFflog(22,11)
+  REAL(8), ALLOCATABLE :: H2mLk(:,:)
+  REAL(8) :: HmWfflog(22), HmFflog(22,11), H2mWlog(18)
 
   ! Level data of the routines above, shared with ContopInit
   REAL(8), PARAMETER :: GHe1(10) = (/ 1.D0, 3.D0, 1.D0, 9.D0, 3.D0, 3.D0, 1.D0, 9.D0, 20.D0, 3.D0 /)
@@ -94,6 +97,33 @@ MODULE Contop
       42.3D0, 50.6D0, 66.4D0, 80.8D0, 94.5D0, 107.D0, 120.D0, 131.D0, 142.D0, 183.D0, 219.D0,                     & !113918
       75.1D0, 90.0D0, 118.D0, 144.D0, 168.D0, 191.D0, 212.D0, 234.D0, 253.D0, 325.D0, 388.D0                      & !151890
       /), (/22,11/), ORDER=(/2,1/))
+  ! Bell (1980, J. Phys. B 13, 1859), table 1: H2- free-free absorption coefficient in units of
+  ! 1e-26 cm^4 dyn^-1 per H2 molecule and unit electron pressure, stimulated emission included;
+  ! wavelengths in A, temperature parameter theta = 5040.4 / T
+  REAL(8), PARAMETER :: H2mWave(18) = (/ &
+      3505.D0, 4142.D0, 5063.D0, 5696.D0, 6509.D0, 7594.D0, 9113.D0, 11391.D0, 15188.D0, &
+      18226.D0, 22783.D0, 30377.D0, 36452.D0, 45565.D0, 60753.D0, 91130.D0, 113913.D0, 151883.D0 /)
+  REAL(8), PARAMETER :: H2mTheta(8) = (/ 0.5D0, 0.8D0, 1.0D0, 1.2D0, 1.6D0, 2.0D0, 2.8D0, 3.6D0 /)
+  REAL(8), PARAMETER :: H2mFf(18,8) = RESHAPE((/ &
+      0.0417D0, 0.061D0, 0.0734D0, 0.0859D0, 0.111D0, 0.137D0, 0.187D0, 0.24D0, & !   3505
+      0.0584D0, 0.0843D0, 0.101D0, 0.117D0, 0.149D0, 0.182D0, 0.249D0, 0.316D0, & !   4142
+      0.087D0, 0.124D0, 0.146D0, 0.167D0, 0.21D0, 0.253D0, 0.339D0, 0.427D0, & !   5063
+      0.11D0, 0.154D0, 0.18D0, 0.206D0, 0.255D0, 0.305D0, 0.406D0, 0.507D0, & !   5696
+      0.143D0, 0.198D0, 0.23D0, 0.259D0, 0.317D0, 0.375D0, 0.492D0, 0.609D0, & !   6509
+      0.192D0, 0.264D0, 0.303D0, 0.339D0, 0.408D0, 0.476D0, 0.613D0, 0.751D0, & !   7594
+      0.273D0, 0.371D0, 0.422D0, 0.467D0, 0.552D0, 0.633D0, 0.797D0, 0.963D0, & !   9113
+      0.42D0, 0.564D0, 0.635D0, 0.697D0, 0.806D0, 0.909D0, 1.11D0, 1.32D0, & !  11391
+      0.736D0, 0.975D0, 1.09D0, 1.18D0, 1.34D0, 1.48D0, 1.74D0, 2.01D0, & !  15188
+      1.05D0, 1.39D0, 1.54D0, 1.66D0, 1.87D0, 2.04D0, 2.36D0, 2.68D0, & !  18226
+      1.63D0, 2.14D0, 2.36D0, 2.55D0, 2.84D0, 3.07D0, 3.49D0, 3.9D0, & !  22783
+      2.89D0, 3.76D0, 4.14D0, 4.44D0, 4.91D0, 5.28D0, 5.9D0, 6.44D0, & !  30377
+      4.15D0, 5.38D0, 5.92D0, 6.35D0, 6.99D0, 7.5D0, 8.32D0, 9.02D0, & !  36452
+      6.47D0, 8.37D0, 9.2D0, 9.84D0, 10.8D0, 11.6D0, 12.8D0, 13.8D0, & !  45565
+      11.5D0, 14.8D0, 16.3D0, 17.4D0, 19.1D0, 20.4D0, 22.4D0, 24.D0, & !  60753
+      25.8D0, 33.3D0, 36.5D0, 39.D0, 42.7D0, 45.4D0, 49.8D0, 53.3D0, & !  91130
+      40.3D0, 52.D0, 57.D0, 60.8D0, 66.5D0, 70.8D0, 77.6D0, 83.D0, & ! 113913
+      71.6D0, 92.3D0, 101.D0, 108.D0, 118.D0, 126.D0, 138.D0, 147.D0  & ! 151883
+      /), (/18,8/), ORDER=(/2,1/))
   REAL(8), PARAMETER :: ElevC1(25) = (/ &
     79314.86D0, 78731.27D0, 78529.62D0, 78309.76D0, 78226.35D0, &
     77679.82D0, 73975.91D0, 72610.72D0, 71374.90D0, 70743.95D0, &
@@ -277,7 +307,7 @@ MODULE Contop
   ! arrays and species indices are set and before any calls to Xcont
   SUBROUTINE ContopInit
     REAL(8) :: XrlogHe(Ntau)
-    REAL(8) :: Nh1, Xr, Bltarg, Bltlog, Exllog, Xrlog
+    REAL(8) :: Nh1, Xr, Bltarg, Bltlog, Exllog, Xrlog, Thlog, Dth
     INTEGER :: i, j, l, n, itau
 
     ! build the Si II log-opacity lookup table (pure atomic data, first call only)
@@ -286,14 +316,15 @@ MODULE Contop
     IF (ALLOCATED(Hckt)) DEALLOCATE(Hckt, BoltHe1, BoltnHe1, BoltexHe1, ExlimHe1, &
       FreetHe1, BoltC1, BoltMg1, BoltSi1, BoltFe1, BoltC2, BoltMg2, &
       Xnfc, Xnfn, Xnfo, Xnfne, Xnfmg, Xnfsi, Xnfs, Xnffe, Xnfp, &
-      BoltH, BoltexH, ExlimH, FreetH, BoltHe2, BoltexHe2, ExlimHe2, FreetHe2, HotexpTkev)
+      BoltH, BoltexH, ExlimH, FreetH, BoltHe2, BoltexHe2, ExlimHe2, FreetHe2, HotexpTkev, H2mLk)
     ALLOCATE(Hckt(Ntau), BoltHe1(Ntau, 10), BoltnHe1(Ntau, 4:27), BoltexHe1(Ntau), &
       ExlimHe1(Ntau), FreetHe1(Ntau), BoltC1(25, Ntau), BoltMg1(15, Ntau), &
       BoltSi1(33, Ntau), BoltFe1(48, Ntau), BoltC2(34, Ntau), BoltMg2(14, Ntau), &
       Xnfc(6, Ntau), Xnfn(6, Ntau), Xnfo(6, Ntau), Xnfne(6, Ntau), Xnfmg(6, Ntau), &
       Xnfsi(6, Ntau), Xnfs(6, Ntau), Xnffe(6, Ntau), Xnfp(21, Ntau), &
       BoltH(Ntau, 8), BoltexH(Ntau), ExlimH(Ntau), FreetH(Ntau), &
-      BoltHe2(9, Ntau), BoltexHe2(Ntau), ExlimHe2(Ntau), FreetHe2(Ntau), HotexpTkev(60, Ntau))
+      BoltHe2(9, Ntau), BoltexHe2(Ntau), ExlimHe2(Ntau), FreetHe2(Ntau), HotexpTkev(60, Ntau), &
+      H2mLk(18, Ntau))
 
     ! hc/kT in cm
     Hckt = Clightcm * Hkt
@@ -326,6 +357,19 @@ MODULE Contop
     ! logarithm of the Bell & Berrington H- free-free table (HMINOP)
     HmWfflog = LOG(91.134D0 / HmWavek)
     HmFflog = LOG(HmFf * 1.D-26)
+
+    ! logarithm of the Bell (1980) H2- free-free table at the temperature of each depth
+    ! (H2MINOP): linear interpolation of log K in log theta, clamped to the tabulated range
+    H2mWlog = LOG(H2mWave)
+    DO j = 1, Ntau
+      Thlog = LOG(MIN(MAX(5040.4D0 / T(j), H2mTheta(1)), H2mTheta(8)))
+      n = 1
+      DO WHILE (n < 7 .AND. Thlog > LOG(H2mTheta(n + 1)))
+        n = n + 1
+      END DO
+      Dth = (Thlog - LOG(H2mTheta(n))) / (LOG(H2mTheta(n + 1)) - LOG(H2mTheta(n)))
+      H2mLk(:, j) = LOG(H2mFf(:, n) * 1.D-26) * (1.D0 - Dth) + LOG(H2mFf(:, n + 1) * 1.D-26) * Dth
+    END DO
 
     ! H I level populations and free-free/pseudo-continuum factors (HOP)
     DO j = 1, Ntau
@@ -1451,11 +1495,11 @@ MODULE Contop
   END SUBROUTINE HERAOP
 
   ! Cool-star metal and molecular continuum opacity following ATLAS12: C I, Mg I, Al I,
-  ! Si I, Fe I bound-free, CH and OH photodissociation, and H2-H2/H2-He collision-induced
-  ! absorption
+  ! Si I, Fe I bound-free, CH and OH photodissociation, H2-H2, H2-He and H2-H collision-induced
+  ! absorption and H2- free-free
   SUBROUTINE Coolop(Acool)
     REAL(8), INTENT(OUT) :: Acool(Ntau)
-    REAL(8), DIMENSION(Ntau) :: Ac1, Amg1, Asi1, Ach, Aoh, Ah2coll
+    REAL(8), DIMENSION(Ntau) :: Ac1, Amg1, Asi1, Ach, Aoh, Ah2coll, Ah2min
     INTEGER :: j
 
     Acool = 0.0D0
@@ -1468,8 +1512,9 @@ MODULE Contop
     CALL CHop(Ach)
     CALL OHop(Aoh)
     CALL H2collop(Ah2coll)
+    CALL H2minop(Ah2min)
     DO j = 1, Ntau
-      Acool(j) = Ac1(j) + Amg1(j) + Asi1(j) + Ach(j) + Aoh(j) + Ah2coll(j) + &
+      Acool(j) = Ac1(j) + Amg1(j) + Asi1(j) + Ach(j) + Aoh(j) + Ah2coll(j) + Ah2min(j) + &
         ( Al1op(j) * FractionPF(IxAl1, j) + &
           Fe1op(j) * FractionPF(IxFe1, j) ) * Stim(j) / Rho(j)
     END DO
@@ -2232,198 +2277,70 @@ MODULE Contop
     END DO
   END SUBROUTINE OHOP
 
-  ! H2-H2 and H2-He collision-induced absorption from Borysow, Jorgensen & Zheng (1997),
-  ! as tabulated in ATLAS12: log10 binary absorption coefficients on a 250 cm^-1 x 1000 K
-  ! grid (0-20000 cm^-1, 1000-7000 K). H2 and He I number densities are taken from the
-  ! EOS. Note: the temperature interpolation weights are inverted in atlas12_2017.for;
-  ! the correct orientation is used here. Returns opacity per gram
+  ! H2-H2, H2-He and H2-H collision-induced absorption from Borysow, Jorgensen & Fu (2001),
+  ! Jorgensen et al. (2000) and Gustafsson & Frommhold (2003), tabulated in CiaData as log10
+  ! binary absorption coefficients on a 50 cm^-1 x 500 K grid (50-20000 cm^-1, 1000-7000 K).
+  ! No extrapolation in wavenumber (H2-H data end at 10000 cm^-1); temperatures outside the
+  ! grid are clamped, and above 2500 K the H2-H table follows the H2-H2 temperature
+  ! dependence (see tools/make_cia_data.py). The tabulated coefficients include stimulated
+  ! emission, so no Stim factor is applied (ATLAS12 applies it a second time). H2, He I and
+  ! H I number densities are taken from the EOS. Returns opacity per gram
   SUBROUTINE H2COLLOP(Ah2coll)
     REAL(8), INTENT(OUT) :: Ah2coll(Ntau)
-    REAL(8), PARAMETER :: H2h2tbl(7,81) = RESHAPE((/ &
-      -46.000D0, -46.000D0, -46.000D0, -46.000D0, -46.000D0, -46.000D0, -46.000D0, &
-      -45.350D0, -45.350D0, -45.350D0, -45.350D0, -45.350D0, -45.350D0, -45.350D0, &
-      -44.850D0, -44.850D0, -44.850D0, -44.850D0, -44.850D0, -45.850D0, -45.850D0, &
-      -44.375D0, -44.465D0, -44.497D0, -44.504D0, -44.502D0, -44.657D0, -44.656D0, &
-      -44.161D0, -44.216D0, -44.249D0, -44.255D0, -44.245D0, -44.231D0, -44.227D0, &
-      -44.160D0, -44.081D0, -44.081D0, -44.076D0, -44.063D0, -44.047D0, -44.042D0, &
-      -44.249D0, -44.017D0, -43.966D0, -43.940D0, -43.918D0, -43.898D0, -43.891D0, &
-      -44.450D0, -44.020D0, -43.900D0, -43.844D0, -43.806D0, -43.776D0, -43.764D0, &
-      -44.712D0, -44.080D0, -43.881D0, -43.785D0, -43.726D0, -43.682D0, -43.662D0, &
-      -45.016D0, -44.186D0, -43.902D0, -43.763D0, -43.677D0, -43.616D0, -43.586D0, &
-      -45.308D0, -44.319D0, -43.958D0, -43.773D0, -43.659D0, -43.579D0, -43.537D0, &
-      -45.452D0, -44.442D0, -44.034D0, -43.810D0, -43.669D0, -43.570D0, -43.514D0, &
-      -45.306D0, -44.500D0, -44.100D0, -43.858D0, -43.697D0, -43.580D0, -43.511D0, &
-      -45.081D0, -44.452D0, -44.111D0, -43.887D0, -43.724D0, -43.598D0, -43.518D0, &
-      -44.801D0, -44.302D0, -44.049D0, -43.876D0, -43.734D0, -43.608D0, -43.522D0, &
-      -44.494D0, -44.104D0, -43.945D0, -43.832D0, -43.720D0, -43.603D0, -43.516D0, &
-      -44.177D0, -43.936D0, -43.849D0, -43.783D0, -43.704D0, -43.596D0, -43.511D0, &
-      -44.042D0, -43.865D0, -43.807D0, -43.767D0, -43.712D0, -43.611D0, -43.527D0, &
-      -44.148D0, -43.922D0, -43.846D0, -43.806D0, -43.763D0, -43.662D0, -43.578D0, &
-      -44.293D0, -44.042D0, -43.936D0, -43.884D0, -43.843D0, -43.742D0, -43.653D0, &
-      -44.444D0, -44.179D0, -44.052D0, -43.984D0, -43.937D0, -43.832D0, -43.739D0, &
-      -44.594D0, -44.311D0, -44.173D0, -44.091D0, -44.033D0, -43.924D0, -43.827D0, &
-      -44.818D0, -44.448D0, -44.292D0, -44.196D0, -44.124D0, -44.012D0, -43.910D0, &
-      -45.097D0, -44.600D0, -44.414D0, -44.300D0, -44.210D0, -44.095D0, -43.989D0, &
-      -45.437D0, -44.782D0, -44.548D0, -44.409D0, -44.294D0, -44.177D0, -44.068D0, &
-      -45.771D0, -44.992D0, -44.702D0, -44.533D0, -44.391D0, -44.269D0, -44.154D0, &
-      -46.088D0, -45.218D0, -44.873D0, -44.672D0, -44.503D0, -44.374D0, -44.251D0, &
-      -46.371D0, -45.438D0, -45.046D0, -44.813D0, -44.621D0, -44.483D0, -44.351D0, &
-      -46.554D0, -45.632D0, -45.209D0, -44.949D0, -44.738D0, -44.590D0, -44.448D0, &
-      -46.593D0, -45.788D0, -45.352D0, -45.074D0, -44.848D0, -44.692D0, -44.542D0, &
-      -46.513D0, -45.887D0, -45.463D0, -45.181D0, -44.950D0, -44.786D0, -44.627D0, &
-      -46.391D0, -45.917D0, -45.542D0, -45.271D0, -45.041D0, -44.873D0, -44.707D0, &
-      -46.197D0, -45.896D0, -45.601D0, -45.350D0, -45.124D0, -44.952D0, -44.781D0, &
-      -46.086D0, -45.911D0, -45.664D0, -45.423D0, -45.198D0, -45.023D0, -44.848D0, &
-      -46.127D0, -45.958D0, -45.723D0, -45.487D0, -45.265D0, -45.089D0, -44.913D0, &
-      -46.077D0, -45.963D0, -45.755D0, -45.534D0, -45.322D0, -45.149D0, -44.973D0, &
-      -46.057D0, -45.947D0, -45.770D0, -45.571D0, -45.371D0, -45.204D0, -45.030D0, &
-      -46.122D0, -45.959D0, -45.792D0, -45.610D0, -45.422D0, -45.260D0, -45.088D0, &
-      -46.302D0, -46.023D0, -45.840D0, -45.662D0, -45.480D0, -45.322D0, -45.149D0, &
-      -46.560D0, -46.146D0, -45.928D0, -45.741D0, -45.557D0, -45.394D0, -45.218D0, &
-      -46.891D0, -46.327D0, -46.058D0, -45.844D0, -45.648D0, -45.477D0, -45.292D0, &
-      -47.245D0, -46.558D0, -46.226D0, -45.967D0, -45.753D0, -45.568D0, -45.372D0, &
-      -47.527D0, -46.793D0, -46.408D0, -46.110D0, -45.871D0, -45.668D0, -45.457D0, &
-      -47.729D0, -47.001D0, -46.589D0, -46.254D0, -45.992D0, -45.771D0, -45.544D0, &
-      -47.829D0, -47.161D0, -46.750D0, -46.391D0, -46.111D0, -45.872D0, -45.630D0, &
-      -47.825D0, -47.265D0, -46.879D0, -46.547D0, -46.239D0, -45.980D0, -45.719D0, &
-      -47.740D0, -47.317D0, -46.979D0, -46.658D0, -46.345D0, -46.075D0, -45.803D0, &
-      -47.635D0, -47.340D0, -47.055D0, -46.755D0, -46.444D0, -46.166D0, -45.882D0, &
-      -47.593D0, -47.358D0, -47.122D0, -46.844D0, -46.536D0, -46.252D0, -45.961D0, &
-      -47.488D0, -47.375D0, -47.178D0, -46.921D0, -46.621D0, -46.334D0, -46.036D0, &
-      -47.517D0, -47.387D0, -47.213D0, -46.982D0, -46.696D0, -46.412D0, -46.109D0, &
-      -47.511D0, -47.385D0, -47.234D0, -47.031D0, -46.765D0, -46.485D0, -46.180D0, &
-      -47.601D0, -47.428D0, -47.274D0, -47.084D0, -46.834D0, -46.558D0, -46.251D0, &
-      -47.740D0, -47.509D0, -47.339D0, -47.150D0, -46.906D0, -46.632D0, -46.322D0, &
-      -48.007D0, -47.632D0, -47.429D0, -47.233D0, -46.988D0, -46.710D0, -46.395D0, &
-      -48.371D0, -47.825D0, -47.563D0, -47.341D0, -47.081D0, -46.794D0, -46.469D0, &
-      -48.778D0, -48.074D0, -47.739D0, -47.476D0, -47.189D0, -46.884D0, -46.547D0, &
-      -49.170D0, -48.341D0, -47.936D0, -47.625D0, -47.304D0, -46.977D0, -46.625D0, &
-      -49.531D0, -48.604D0, -48.136D0, -47.780D0, -47.424D0, -47.074D0, -46.704D0, &
-      -49.869D0, -48.850D0, -48.328D0, -47.932D0, -47.543D0, -47.170D0, -46.784D0, &
-      -50.189D0, -49.080D0, -48.510D0, -48.078D0, -47.660D0, -47.264D0, -46.863D0, &
-      -50.496D0, -49.299D0, -48.682D0, -48.218D0, -47.774D0, -47.358D0, -46.940D0, &
-      -50.797D0, -49.508D0, -48.847D0, -48.353D0, -47.885D0, -47.449D0, -47.018D0, &
-      -51.088D0, -49.711D0, -49.008D0, -48.484D0, -47.993D0, -47.540D0, -47.094D0, &
-      -51.374D0, -49.907D0, -49.163D0, -48.613D0, -48.100D0, -47.629D0, -47.170D0, &
-      -51.655D0, -50.102D0, -49.317D0, -48.740D0, -48.205D0, -47.717D0, -47.246D0, &
-      -51.931D0, -50.293D0, -49.468D0, -48.865D0, -48.309D0, -47.804D0, -47.321D0, &
-      -52.205D0, -50.481D0, -49.617D0, -48.989D0, -48.413D0, -47.891D0, -47.396D0, &
-      -52.475D0, -50.670D0, -49.767D0, -49.112D0, -48.516D0, -47.978D0, -47.470D0, &
-      -52.742D0, -50.855D0, -49.915D0, -49.235D0, -48.619D0, -48.064D0, -47.545D0, &
-      -53.010D0, -51.038D0, -50.062D0, -49.358D0, -48.721D0, -48.150D0, -47.619D0, &
-      -53.277D0, -51.221D0, -50.209D0, -49.481D0, -48.824D0, -48.236D0, -47.692D0, &
-      -53.545D0, -51.399D0, -50.353D0, -49.602D0, -48.925D0, -48.321D0, -47.765D0, &
-      -53.812D0, -51.575D0, -50.496D0, -49.722D0, -49.026D0, -48.405D0, -47.839D0, &
-      -54.080D0, -51.748D0, -50.634D0, -49.840D0, -49.125D0, -48.489D0, -47.911D0, &
-      -54.347D0, -51.918D0, -50.769D0, -49.954D0, -49.222D0, -48.571D0, -47.984D0, &
-      -54.615D0, -52.086D0, -50.900D0, -50.065D0, -49.317D0, -48.653D0, -48.055D0, &
-      -54.882D0, -52.253D0, -51.029D0, -50.174D0, -49.411D0, -48.733D0, -48.125D0, &
-      -55.150D0, -52.419D0, -51.158D0, -50.282D0, -49.506D0, -48.813D0, -48.196D0, &
-      -55.417D0, -52.584D0, -51.288D0, -50.399D0, -49.642D0, -48.903D0, -48.268D0, &
-      -55.685D0, -52.778D0, -51.420D0, -50.527D0, -49.732D0, -48.981D0, -48.338D0 /), (/7,81/))
-    REAL(8), PARAMETER :: H2hetbl(7,81) = RESHAPE((/ &
-      -46.000D0, -46.000D0, -46.000D0, -46.000D0, -46.000D0, -46.000D0, -46.000D0, &
-      -44.288D0, -44.288D0, -44.288D0, -44.288D0, -44.288D0, -44.288D0, -44.288D0, &
-      -44.288D0, -44.142D0, -44.045D0, -43.997D0, -43.949D0, -44.900D0, -43.852D0, &
-      -44.362D0, -44.090D0, -43.978D0, -43.901D0, -43.833D0, -43.939D0, -43.716D0, &
-      -44.461D0, -44.114D0, -43.954D0, -43.863D0, -43.786D0, -43.717D0, -43.654D0, &
-      -44.601D0, -44.195D0, -43.973D0, -43.875D0, -43.791D0, -43.715D0, -43.646D0, &
-      -44.777D0, -44.292D0, -44.012D0, -43.905D0, -43.813D0, -43.732D0, -43.658D0, &
-      -45.000D0, -44.402D0, -44.061D0, -43.946D0, -43.844D0, -43.756D0, -43.678D0, &
-      -45.268D0, -44.530D0, -44.122D0, -43.996D0, -43.883D0, -43.786D0, -43.703D0, &
-      -45.562D0, -44.680D0, -44.199D0, -44.059D0, -43.932D0, -43.823D0, -43.733D0, &
-      -45.841D0, -44.841D0, -44.289D0, -44.128D0, -43.983D0, -43.862D0, -43.766D0, &
-      -46.012D0, -44.969D0, -44.371D0, -44.182D0, -44.017D0, -43.891D0, -43.789D0, &
-      -45.931D0, -44.975D0, -44.394D0, -44.173D0, -43.999D0, -43.872D0, -43.779D0, &
-      -45.621D0, -44.790D0, -44.293D0, -44.062D0, -43.905D0, -43.793D0, -43.726D0, &
-      -45.151D0, -44.469D0, -44.084D0, -43.871D0, -43.755D0, -43.705D0, -43.666D0, &
-      -44.620D0, -44.131D0, -43.871D0, -43.715D0, -43.640D0, -43.644D0, -43.628D0, &
-      -44.166D0, -43.892D0, -43.748D0, -43.674D0, -43.639D0, -43.628D0, -43.625D0, &
-      -44.023D0, -43.837D0, -43.743D0, -43.710D0, -43.691D0, -43.663D0, -43.660D0, &
-      -44.190D0, -43.942D0, -43.830D0, -43.782D0, -43.755D0, -43.735D0, -43.719D0, &
-      -44.446D0, -44.120D0, -43.967D0, -43.884D0, -43.839D0, -43.807D0, -43.776D0, &
-      -44.689D0, -44.312D0, -44.120D0, -44.011D0, -43.932D0, -43.872D0, -43.826D0, &
-      -44.904D0, -44.491D0, -44.269D0, -44.134D0, -44.022D0, -43.941D0, -43.881D0, &
-      -45.133D0, -44.656D0, -44.407D0, -44.244D0, -44.115D0, -44.016D0, -43.941D0, &
-      -45.398D0, -44.824D0, -44.543D0, -44.359D0, -44.217D0, -44.098D0, -44.006D0, &
-      -45.701D0, -45.010D0, -44.686D0, -44.481D0, -44.322D0, -44.186D0, -44.076D0, &
-      -46.024D0, -45.221D0, -44.843D0, -44.610D0, -44.431D0, -44.275D0, -44.147D0, &
-      -46.350D0, -45.449D0, -45.015D0, -44.747D0, -44.542D0, -44.366D0, -44.219D0, &
-      -46.736D0, -45.674D0, -45.189D0, -44.887D0, -44.657D0, -44.458D0, -44.294D0, &
-      -46.993D0, -45.865D0, -45.347D0, -45.023D0, -44.771D0, -44.551D0, -44.367D0, &
-      -47.031D0, -45.981D0, -45.469D0, -45.141D0, -44.878D0, -44.640D0, -44.437D0, &
-      -46.787D0, -46.008D0, -45.553D0, -45.244D0, -44.979D0, -44.727D0, -44.506D0, &
-      -46.496D0, -45.969D0, -45.618D0, -45.343D0, -45.085D0, -44.820D0, -44.579D0, &
-      -46.310D0, -45.953D0, -45.689D0, -45.449D0, -45.198D0, -44.919D0, -44.656D0, &
-      -46.295D0, -46.001D0, -45.787D0, -45.572D0, -45.321D0, -45.021D0, -44.732D0, &
-      -46.434D0, -46.122D0, -45.919D0, -45.717D0, -45.453D0, -45.123D0, -44.804D0, &
-      -46.671D0, -46.306D0, -46.085D0, -45.896D0, -45.588D0, -45.224D0, -44.873D0, &
-      -46.964D0, -46.539D0, -46.284D0, -46.068D0, -45.723D0, -45.320D0, -44.937D0, &
-      -47.295D0, -46.807D0, -46.501D0, -46.241D0, -45.858D0, -45.412D0, -44.998D0, &
-      -47.662D0, -47.097D0, -46.723D0, -46.415D0, -45.996D0, -45.500D0, -45.056D0, &
-      -48.050D0, -47.399D0, -46.949D0, -46.583D0, -46.135D0, -45.587D0, -45.111D0, &
-      -48.416D0, -47.683D0, -47.169D0, -46.749D0, -46.274D0, -45.671D0, -45.165D0, &
-      -48.678D0, -47.892D0, -47.359D0, -46.907D0, -46.412D0, -45.752D0, -45.215D0, &
-      -48.720D0, -47.963D0, -47.494D0, -47.044D0, -46.551D0, -45.828D0, -45.263D0, &
-      -48.583D0, -47.912D0, -47.566D0, -47.160D0, -46.689D0, -45.901D0, -45.309D0, &
-      -48.380D0, -47.807D0, -47.574D0, -47.236D0, -46.828D0, -45.972D0, -45.354D0, &
-      -48.164D0, -47.692D0, -47.543D0, -47.281D0, -46.953D0, -46.041D0, -45.397D0, &
-      -47.988D0, -47.603D0, -47.513D0, -47.300D0, -47.028D0, -46.106D0, -45.438D0, &
-      -47.874D0, -47.562D0, -47.506D0, -47.326D0, -47.085D0, -46.171D0, -45.479D0, &
-      -47.846D0, -47.571D0, -47.518D0, -47.361D0, -47.141D0, -46.235D0, -45.519D0, &
-      -47.827D0, -47.577D0, -47.536D0, -47.397D0, -47.194D0, -46.298D0, -45.558D0, &
-      -47.841D0, -47.583D0, -47.548D0, -47.416D0, -47.234D0, -46.357D0, -45.596D0, &
-      -47.949D0, -47.631D0, -47.550D0, -47.411D0, -47.253D0, -46.412D0, -45.632D0, &
-      -48.168D0, -47.763D0, -47.580D0, -47.428D0, -47.282D0, -46.467D0, -45.668D0, &
-      -48.442D0, -47.955D0, -47.682D0, -47.516D0, -47.360D0, -46.528D0, -45.704D0, &
-      -48.685D0, -48.145D0, -47.839D0, -47.654D0, -47.473D0, -46.593D0, -45.741D0, &
-      -48.859D0, -48.310D0, -47.990D0, -47.778D0, -47.575D0, -46.655D0, -45.777D0, &
-      -48.989D0, -48.445D0, -48.118D0, -47.878D0, -47.660D0, -46.714D0, -45.813D0, &
-      -49.121D0, -48.560D0, -48.250D0, -47.981D0, -47.749D0, -46.773D0, -45.847D0, &
-      -49.277D0, -48.667D0, -48.390D0, -48.094D0, -47.842D0, -46.831D0, -45.881D0, &
-      -49.469D0, -48.778D0, -48.525D0, -48.202D0, -47.933D0, -46.888D0, -45.916D0, &
-      -49.697D0, -48.907D0, -48.650D0, -48.303D0, -48.019D0, -46.943D0, -45.949D0, &
-      -49.939D0, -49.059D0, -48.774D0, -48.403D0, -48.104D0, -46.996D0, -45.982D0, &
-      -50.225D0, -49.227D0, -48.898D0, -48.504D0, -48.190D0, -47.049D0, -46.015D0, &
-      -50.537D0, -49.406D0, -49.016D0, -48.603D0, -48.273D0, -47.101D0, -46.048D0, &
-      -50.831D0, -49.598D0, -49.130D0, -48.697D0, -48.354D0, -47.152D0, -46.080D0, &
-      -50.981D0, -49.807D0, -49.239D0, -48.791D0, -48.435D0, -47.202D0, -46.112D0, &
-      -51.106D0, -50.006D0, -49.345D0, -48.882D0, -48.514D0, -47.251D0, -46.145D0, &
-      -51.231D0, -50.131D0, -49.445D0, -48.972D0, -48.591D0, -47.299D0, -46.176D0, &
-      -51.356D0, -50.256D0, -49.540D0, -49.060D0, -48.667D0, -47.347D0, -46.208D0, &
-      -51.481D0, -50.381D0, -49.629D0, -49.143D0, -48.741D0, -47.392D0, -46.239D0, &
-      -51.606D0, -50.506D0, -49.711D0, -49.225D0, -48.813D0, -47.437D0, -46.271D0, &
-      -51.731D0, -50.631D0, -49.787D0, -49.303D0, -48.885D0, -47.481D0, -46.302D0, &
-      -51.856D0, -50.756D0, -49.858D0, -49.377D0, -48.955D0, -47.523D0, -46.333D0, &
-      -51.981D0, -50.881D0, -49.929D0, -49.449D0, -49.023D0, -47.566D0, -46.364D0, &
-      -52.106D0, -51.006D0, -50.000D0, -49.517D0, -49.089D0, -47.607D0, -46.395D0, &
-      -52.231D0, -51.131D0, -50.069D0, -49.581D0, -49.154D0, -47.647D0, -46.425D0, &
-      -52.356D0, -51.256D0, -50.133D0, -49.642D0, -49.217D0, -47.687D0, -46.456D0, &
-      -52.481D0, -51.381D0, -50.204D0, -49.699D0, -49.278D0, -47.726D0, -46.486D0, &
-      -52.606D0, -51.506D0, -50.275D0, -49.752D0, -49.337D0, -47.765D0, -46.517D0, &
-      -52.731D0, -51.631D0, -50.347D0, -49.803D0, -49.396D0, -47.802D0, -46.548D0, &
-      -52.856D0, -51.756D0, -50.418D0, -49.850D0, -49.450D0, -47.839D0, -46.578D0 /), (/7,81/))
-    REAL(8) :: Waveno, Delnu, Delt, H2h2nu(7), H2henu(7), Xh2h2, Xh2he, Xnh2
+    REAL(8) :: Waveno, Delnu, Delt, Xh2h2, Xh2he, Xh2h, Xnh2
+    REAL(8) :: H2h2nu(CiaNt), H2henu(CiaNt), H2hnu(CiaNt)
     INTEGER :: nu, it, j
+    LOGICAL :: H2h
 
     Ah2coll = 0.0D0
     Waveno = Freq / Clightcm
-    IF (Waveno > 20000.D0) RETURN
-    nu = MIN(INT(Waveno / 250.D0) + 1, 80)
-    Delnu = (Waveno - 250.D0 * REAL(nu - 1, 8)) / 250.D0
-    DO it = 1, 7
-      H2h2nu(it) = H2h2tbl(it, nu) * (1.D0 - Delnu) + H2h2tbl(it, nu + 1) * Delnu
-      H2henu(it) = H2hetbl(it, nu) * (1.D0 - Delnu) + H2hetbl(it, nu + 1) * Delnu
-    END DO
+    IF (Waveno < CiaWn0 .OR. Waveno > CiaWn0 + CiaDwn * REAL(CiaNwn - 1, 8)) RETURN
+    ! interpolation in wavenumber
+    nu = MIN(INT((Waveno - CiaWn0) / CiaDwn) + 1, CiaNwn - 1)
+    Delnu = (Waveno - CiaWn0) / CiaDwn - REAL(nu - 1, 8)
+    H2h2nu = CiaH2h2(:, nu) * (1.D0 - Delnu) + CiaH2h2(:, nu + 1) * Delnu
+    H2henu = CiaH2he(:, nu) * (1.D0 - Delnu) + CiaH2he(:, nu + 1) * Delnu
+    H2h = Waveno <= CiaWnH2h
+    IF (H2h) H2hnu = CiaH2h(:, nu) * (1.D0 - Delnu) + CiaH2h(:, nu + 1) * Delnu
+    ! interpolation in temperature and opacity per gram
     DO j = 1, Ntau
-      it = MAX(1, MIN(6, INT(T(j) / 1000.D0)))
-      Delt = MAX(0.D0, MIN(1.D0, (T(j) - 1000.D0 * REAL(it, 8)) / 1000.D0))
+      it = MAX(1, MIN(CiaNt - 1, INT((T(j) - CiaT0) / CiaDt) + 1))
+      Delt = MAX(0.D0, MIN(1.D0, (T(j) - CiaT0) / CiaDt - REAL(it - 1, 8)))
       Xh2h2 = H2h2nu(it) * (1.D0 - Delt) + H2h2nu(it + 1) * Delt
       Xh2he = H2henu(it) * (1.D0 - Delt) + H2henu(it + 1) * Delt
       Xnh2 = Fraction(IxHmol, j)
-      Ah2coll(j) = (10.D0**Xh2he * Fraction(IxHe1, j) + 10.D0**Xh2h2 * Xnh2) * Xnh2 / Rho(j) * Stim(j)
+      Ah2coll(j) = 10.D0**Xh2h2 * Xnh2 + 10.D0**Xh2he * Fraction(IxHe1, j)
+      IF (H2h) THEN
+        Xh2h = H2hnu(it) * (1.D0 - Delt) + H2hnu(it + 1) * Delt
+        Ah2coll(j) = Ah2coll(j) + 10.D0**Xh2h * Fraction(IxH1, j)
+      END IF
+      Ah2coll(j) = Ah2coll(j) * Xnh2 / Rho(j)
     END DO
   END SUBROUTINE H2COLLOP
+
+  ! H2- free-free opacity from Bell (1980, J. Phys. B 13, 1859), table 1: absorption coefficient
+  ! per H2 molecule and unit electron pressure, interpolated linearly in log K versus log
+  ! wavelength and continued as a power law beyond the tabulated 3505-151883 A (the temperature
+  ! interpolation is done by ContopInit). The coefficient includes stimulated emission, so no
+  ! Stim factor is applied. H2 number densities are taken from the EOS. Returns opacity per gram
+  SUBROUTINE H2MINOP(Ah2min)
+    REAL(8), INTENT(OUT) :: Ah2min(Ntau)
+    REAL(8) :: Wlog, Dw
+    INTEGER :: i, j
+
+    ! wavelength interval; the end intervals are extended for the power-law continuation
+    Wlog = LOG(Clight / Freq)
+    i = 1
+    DO WHILE (i < 17 .AND. Wlog > H2mWlog(i + 1))
+      i = i + 1
+    END DO
+    Dw = (Wlog - H2mWlog(i)) / (H2mWlog(i + 1) - H2mWlog(i))
+    ! opacity per gram: K * Pe * n(H2) / rho
+    DO j = 1, Ntau
+      Ah2min(j) = EXP(H2mLk(i, j) * (1.D0 - Dw) + H2mLk(i + 1, j) * Dw) * Xne(j) * Tk(j) * &
+        Fraction(IxHmol, j) / Rho(j)
+    END DO
+  END SUBROUTINE H2MINOP
 
   ! Warm-star metal continuum opacity following ATLAS12: multi-level C II, Mg II and
   ! Si II bound-free plus N I, O I and Ca II cross-section functions

@@ -17,9 +17,10 @@ MODULE Convol
   USE Config
   USE AtmosData
   USE SpecData
+  USE Utils, ONLY: MuQuadrature, MuQuadType, SemiArea
 
   IMPLICIT NONE
-  
+
   CONTAINS
 
   ! Disk-integration and convolution
@@ -62,53 +63,25 @@ MODULE Convol
   
   END SUBROUTINE IntegConvol
 
-  ! Precompute the disk-integration annulus area weights
-  SUBROUTINE MuWeights
-
-    INTEGER :: i
-    REAL(8) :: Rmu(Nmu), MuRadii(Nmu+1)
-
-    IF (.NOT. ALLOCATED(Wmu)) ALLOCATE(Wmu(Nmu))
-
-    ! projected radii of the mu angles (stellar radius is unit); ascending because
-    ! Xmu is in descending order. rmu = sin(angle) = sqrt(1-Xmu^2)
-    Rmu = SQRT(1d0 - Xmu**2)
-
-    ! projected radii for the boundaries of the disk integration annuli
-    MuRadii(1) = 0.0d0
-    DO i = 2, Nmu
-      MuRadii(i) = SQRT(0.5d0 * (Rmu(i - 1)**2 + Rmu(i)**2))
-    END DO
-    MuRadii(Nmu + 1) = 1.0d0
-
-    ! integration weights for each disk integration annulus
-    DO i = 1, Nmu
-      Wmu(i) = MuRadii(i + 1)**2 - MuRadii(i)**2
-    END DO
-
-  END SUBROUTINE MuWeights
-
   ! Disk integration and convolution
   SUBROUTINE DiskInteg
 
     INTEGER :: i, j, k, imu, Nrk, Nmk, Nm, Nt
-    REAL(8) :: Rmu(Nmu), MuRadii(Nmu+1)
     REAL(8) :: Dv, Sigma, Sigr, Sigt, R1, R2, Maxv, Norm, V, SumL, SumC, Arg
+    REAL(8) :: MuRadii(Nmu+1)
     REAL(8), ALLOCATABLE :: Rkern(:), Mkern(:), Mrkern(:), Mtkern(:), TL(:), TC(:), SiL(:), SiC(:)
     REAL(8), PARAMETER :: Awr = 0.5d0, Awt = 0.5d0
 
-    ! annulus area weights: precomputed by Init when flux or line strength output is
-    ! requested, computed here in the post-processing mode
-    IF (.NOT. ALLOCATED(Wmu)) CALL MuWeights
+    ! in the post-processing mode the quadrature is identified from the mu values of the
+    ! intensity file (in a synthesis run DiskQuad and Wmu are set by ReadInputFile)
+    IF (.NOT. ALLOCATED(Wmu)) THEN
+      DiskQuad = MuQuadType(Nmu, Xmu)
+      ALLOCATE(Wmu(Nmu))
+    END IF
 
-    ! projected radii of the annulus boundaries, recomputed from the (descending-sorted)
-    ! Xmu grid for the rotational broadening kernel
-    Rmu = SQRT(1d0 - Xmu**2)
-    MuRadii(1) = 0.0d0
-    DO i = 2, Nmu
-      MuRadii(i) = SQRT(0.5d0 * (Rmu(i - 1)**2 + Rmu(i)**2))
-    END DO
-    MuRadii(Nmu + 1) = 1.0d0
+    ! flux weights and projected radii of the annulus boundaries for the rotational
+    ! broadening kernel
+    CALL MuQuadrature(DiskQuad, Nmu, Xmu, Wmu, MuRadii, .FALSE.)
 
     ! velocity step between spectral points
     IF (Wmode == 0) THEN
@@ -142,11 +115,12 @@ MODULE Convol
       SiC = SpC(imu,:)
     
       ! construct the convolution kernel, which describes the distribution
-      ! of rotational velocities present in the current annulus. The 
+      ! of rotational velocities present in the current annulus. The
       ! distribution has been derived analytically for annuli of arbitrary
-      ! thickness in a rigidly rotating star. There are 2 kernel pieces:
-      ! radial velocities less than the maximum velocity along the inner
-      ! edge of the annulus, and velocities bigger than this limit.
+      ! thickness in a rigidly rotating star: the kernel value of a velocity
+      ! pixel is the projected area of the annulus between the velocities of
+      ! the pixel edges (disk of radius R2 minus disk of radius R1), which
+      ! stays accurate for annuli narrower than a pixel.
       IF (Vsini > 0d0) THEN
         R1 = Vsini * MuRadii(imu)
         R2 = Vsini * MuRadii(imu + 1)
@@ -155,22 +129,17 @@ MODULE Convol
         Norm = 0.0d0
         DO i = 1, Nrk
           V = ABS(Dv * (i - 1 - (Nrk - 1) / 2))
-          IF (V < R1) THEN                      ! low velocity points
-            Rkern(i) = SQRT(R2*R2 - V*V) - SQRT(R1*R1 - V*V)
-            Norm = Norm + Rkern(i)
-          ELSE IF (V <= R2) THEN                ! high velocity points
-            Rkern(i) = SQRT(R2*R2 - V*V)
-            Norm = Norm + Rkern(i)
-          ELSE
-            Rkern(i) = 0d0
-          ENDIF
+          Rkern(i) = SemiArea(R2, V + 0.5d0 * Dv) - SemiArea(R2, V - 0.5d0 * Dv) - &
+                     SemiArea(R1, V + 0.5d0 * Dv) + SemiArea(R1, V - 0.5d0 * Dv)
+          Norm = Norm + Rkern(i)
         END DO
         Rkern = Rkern / Norm
-      
+
         ! convolve the intensity profile with the rotational velocity
-        ! kernel for this annulus. Pad each end of the profile with as
-        ! many points as are in the convolution kernel.      
-        IF (Nrk > 3) THEN
+        ! kernel for this annulus, unless all its velocities fall within the
+        ! central pixel. Pad each end of the profile with as many points as
+        ! are in the convolution kernel.
+        IF (R2 > 0.5d0 * Dv) THEN
 
           ! pad
           TL(1:Nrk) = SiL(1)
@@ -273,7 +242,7 @@ MODULE Convol
       CALL ConvolGau(Nwl, SfL, Vgau)
       CALL ConvolGau(Nwl, SfC, Vgau)
     END IF
-    
+
   END SUBROUTINE DiskInteg
 
   ! Convolution of a single spectrum with a Gaussian profile

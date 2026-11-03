@@ -6,12 +6,14 @@
 ! utils.f90: general-purpose utility routines - timing and time formatting, string
 ! manipulation and keyword parsing, error termination, abundance table handling, species
 ! name and ionisation stage parsing, vacuum-to-air wavelength conversion, isotopic
-! fractions of molecular species, Zeeman splitting pattern calculation.
+! fractions of molecular species, Zeeman splitting pattern calculation, limb-angle
+! quadratures and annulus areas for disk integration.
 !
 ! =============================================================================================
 
 ! General utility routines
 MODULE Utils
+  USE Constants, ONLY: Pi
   IMPLICIT NONE
 
 CONTAINS
@@ -1209,5 +1211,180 @@ CONTAINS
     DEALLOCATE(isotopfrac)
 
   END FUNCTION GetIsot
+
+  ! Limb angles and disk-integration weights for different quadratures
+  SUBROUTINE MuQuadrature(Quad, N, X, W, R, SetNodes)
+
+    INTEGER, INTENT(IN) :: Quad, N
+    LOGICAL, INTENT(IN) :: SetNodes
+    REAL(8), INTENT(INOUT) :: X(N)
+    REAL(8), INTENT(OUT) :: W(N), R(N+1)
+    INTEGER :: i
+    REAL(8) :: Rmu(N), Xg(N), Wg(N)
+
+    ! single angle: disk centre
+    IF (N == 1) THEN
+      IF (SetNodes) X(1) = 1d0
+      W(1) = 1d0
+      R(1) = 0d0
+      R(2) = 1d0
+      RETURN
+    END IF
+
+    SELECT CASE (Quad)
+
+    ! equal-area annuli: angles at the midpoints in projected area, annulus boundaries
+    ! halfway in projected area between adjacent angles, weights equal to the annulus areas
+    CASE (0)
+      IF (SetNodes) THEN
+        DO i = 1, N
+          X(i) = SQRT( MAX(0.0D0, 1.0D0 - (REAL(i,8) - 0.5D0) / REAL(N,8)) )
+        END DO
+      END IF
+
+      ! projected radii of the angles (stellar radius is unit), ascending
+      Rmu = SQRT(1d0 - X**2)
+
+      ! projected radii of the annulus boundaries and the annulus areas
+      R(1) = 0.0d0
+      DO i = 2, N
+        R(i) = SQRT(0.5d0 * (Rmu(i - 1)**2 + Rmu(i)**2))
+      END DO
+      R(N + 1) = 1.0d0
+      DO i = 1, N
+        W(i) = R(i + 1)**2 - R(i)**2
+      END DO
+
+    ! Gauss-Legendre and Gauss-Radau: flux weights 2 w mu of the rule applied to the flux
+    ! integral 2 int I mu dmu; each annulus encloses the projected area of its weight, which
+    ! keeps every node inside its own annulus
+    CASE (1, 2)
+      CALL GaussMu(Quad, N, Xg, Wg)
+      IF (SetNodes) X = Xg
+      W = 2d0 * Wg * Xg
+      R(1) = 0d0
+      DO i = 1, N - 1
+        R(i + 1) = SQRT(R(i)**2 + W(i))
+      END DO
+      R(N + 1) = 1d0
+
+    CASE DEFAULT
+      CALL ErrStop('MuQuadrature: unknown disk-integration quadrature')
+
+    END SELECT
+
+  END SUBROUTINE MuQuadrature
+
+  ! Disk-integration quadrature of N limb angles X (descending): 1 for the Gauss-Legendre
+  ! nodes, 2 for the Gauss-Radau nodes (to within 1d-6), 0 for any other set
+  INTEGER FUNCTION MuQuadType(N, X) RESULT(Quad)
+
+    INTEGER, INTENT(IN) :: N
+    REAL(8), INTENT(IN) :: X(N)
+    INTEGER :: q
+    REAL(8) :: Xg(N), Wg(N)
+
+    Quad = 0
+    IF (N < 2) RETURN
+    DO q = 1, 2
+      CALL GaussMu(q, N, Xg, Wg)
+      IF (MAXVAL(ABS(X - Xg)) < 1d-6) THEN
+        Quad = q
+        RETURN
+      END IF
+    END DO
+
+  END FUNCTION MuQuadType
+
+  ! Nodes X (descending) and weights W on [0, 1] of the N-point Gauss-Legendre rule (Quad = 1)
+  ! or of the Gauss-Radau rule with a fixed node at 1 (Quad = 2), by Newton iteration on [-1, 1]
+  SUBROUTINE GaussMu(Quad, N, X, W)
+
+    INTEGER, INTENT(IN) :: Quad, N
+    REAL(8), INTENT(OUT) :: X(N), W(N)
+    INTEGER :: i, it
+    REAL(8) :: Z, Dz, Pn, Pn1, Pn2, F, Df
+
+    IF (Quad == 1) THEN
+
+      ! roots of P_N; they are symmetric about zero, so only the non-negative half is iterated
+      DO i = 1, (N + 1) / 2
+        Z = COS(Pi * (i - 0.25d0) / (N + 0.5d0))
+        DO it = 1, 100
+          CALL LegendreP(N, Z, Pn, Pn1, Pn2)
+          Df = N * (Z * Pn - Pn1) / (Z * Z - 1d0)
+          Dz = Pn / Df
+          Z = Z - Dz
+          IF (ABS(Dz) < 1d-15) EXIT
+        END DO
+        CALL LegendreP(N, Z, Pn, Pn1, Pn2)
+        Df = N * (Z * Pn - Pn1) / (Z * Z - 1d0)
+
+        ! map the pair of roots +-Z onto [0, 1]; weight 2 / ((1 - z^2) P_N'^2) halved
+        X(i) = 0.5d0 * (1d0 + Z)
+        X(N + 1 - i) = 0.5d0 * (1d0 - Z)
+        W(i) = 1d0 / ((1d0 - Z * Z) * Df * Df)
+        W(N + 1 - i) = W(i)
+      END DO
+
+    ELSE
+
+      ! fixed node at z = 1 with weight 2 / N^2, halved on [0, 1]
+      X(1) = 1d0
+      W(1) = 1d0 / REAL(N * N, 8)
+
+      ! free nodes: roots of P_(N-1) - P_N, starting from the Chebyshev-Gauss-Radau points
+      DO i = 1, N - 1
+        Z = COS(2d0 * Pi * i / (2d0 * N - 1d0))
+        DO it = 1, 100
+          CALL LegendreP(N, Z, Pn, Pn1, Pn2)
+          F = Pn1 - Pn
+          Df = ((N - 1) * (Z * Pn1 - Pn2) - N * (Z * Pn - Pn1)) / (Z * Z - 1d0)
+          Dz = F / Df
+          Z = Z - Dz
+          IF (ABS(Dz) < 1d-15) EXIT
+        END DO
+        CALL LegendreP(N, Z, Pn, Pn1, Pn2)
+
+        ! map onto [0, 1]; weight (1 + z) / (N^2 P_(N-1)^2) halved
+        X(i + 1) = 0.5d0 * (1d0 + Z)
+        W(i + 1) = 0.5d0 * (1d0 + Z) / (REAL(N * N, 8) * Pn1 * Pn1)
+      END DO
+
+    END IF
+
+  END SUBROUTINE GaussMu
+
+  ! Legendre polynomials P_N, P_(N-1) and P_(N-2) at Z by the three-term recurrence (N >= 1)
+  SUBROUTINE LegendreP(N, Z, Pn, Pn1, Pn2)
+
+    INTEGER, INTENT(IN) :: N
+    REAL(8), INTENT(IN) :: Z
+    REAL(8), INTENT(OUT) :: Pn, Pn1, Pn2
+    INTEGER :: j
+
+    Pn1 = 0d0
+    Pn = 1d0
+    DO j = 1, N
+      Pn2 = Pn1
+      Pn1 = Pn
+      Pn = ((2d0 * j - 1d0) * Z * Pn1 - (j - 1d0) * Pn2) / j
+    END DO
+
+  END SUBROUTINE LegendreP
+
+  ! Integral of SQRT(R^2 - t^2) over t from 0 to V, with V clipped to [-R, R]: half the area
+  ! of the part of a disk of radius R between x = 0 and x = V (zero for R = 0)
+  PURE REAL(8) FUNCTION SemiArea(R, V) RESULT(A)
+
+    REAL(8), INTENT(IN) :: R, V
+    REAL(8) :: X
+
+    A = 0d0
+    IF (R <= 0d0) RETURN
+    X = MAX(-R, MIN(R, V))
+    A = 0.5d0 * (X * SQRT(MAX(0d0, R * R - X * X)) + R * R * ASIN(X / R))
+
+  END FUNCTION SemiArea
 
 END MODULE Utils

@@ -25,6 +25,7 @@ Ready-to-run parameter files are in the `examples/` directory.
 | `MODEL` | Model-atmosphere file name (`.krz`) | -- |
 | **Optional** | | |
 | `MUS` | Number of &mu; angles, or an explicit list of &mu; values | 7 |
+| `DISKQUAD` | Disk-integration quadrature for a number of &mu; angles: equal-area annuli (0), Gauss-Legendre (1), Gauss-Radau with a node at &mu; = 1 (2) | 1 |
 | `VMIC` | Microturbulent velocity (km/s) | 0.0 |
 | `CONVOL` | *v* sin *i*, *v*<sub>mac</sub> (km/s) and Gaussian width (km/s) or resolving power | none |
 | `BFIELD` | Magnetic field vector (G): three numbers for `BFRAME` 0 or 1, or 2*N*<sub>&mu;</sub>+1 numbers for `BFRAME` 2 | none |
@@ -35,10 +36,12 @@ Ready-to-run parameter files are in the `examples/` directory.
 | `LIMITRAM` | RAM limit (GB) for the large arrays | 16 |
 | `EPSOPAC` | Line-to-continuum threshold &epsilon; for line inclusion | 10<sup>-4</sup> |
 | `VWFUDGE` | Scaling factor of the Uns&ouml;ld van der Waals width for atomic lines without broadening parameter | 1.0 |
-| `H2BRD` | Include H<sub>2</sub> in the van der Waals broadening (0/1) | 0 |
+| `H2BRD` | Scaling factor of the H<sub>2</sub> contribution to the van der Waals broadening | 0.0 |
 | `MOLBRD` | Apply Stark and van der Waals broadening to molecular lines (0/1) | 0 |
+| `VWMOL` | Van der Waals broadening constant for all molecular lines | 0.0 |
 | `BFKURUCZ` | Choice of hydrogen bound-free cross-sections: ATLAS (1) or MARCS (0) | 1 |
 | `HPROF` | Hydrogen line profiles: original HLINOP (0), corrected HLINOP (1), Lemke tables (2), Stehl&eacute; & Hutcheon tables (3) | 2 |
+| `HYDROSTAT` | Re-solve the hydrostatic structure when the abundances differ from those of the model header (0/1) | 0 |
 
 ## Details
 
@@ -86,9 +89,25 @@ The model atmosphere in `.krz` format. Plane-parallel and spherical models are s
 
 ### `MUS`
 
-- An integer *N* (no decimal point) gives *N* angles &mu;<sub>i</sub> = [1 - (i - 0.5)/*N*]<sup>1/2</sup>, i = 1...*N*; `mus=1` is the disk centre.
-- A value with a decimal point starts an explicit list of &mu; values (0 < &mu; &le; 1), e.g. `mus=1.0, 0.5, 0.2`. The list may continue on the following lines. A single off-centre angle is written as e.g. `mus=0.5`.
+- An integer *N* (no decimal point) gives *N* angles placed according to `DISKQUAD`; `mus=1` is the disk centre.
+- A value with a decimal point starts an explicit list of &mu; values (0 < &mu; &le; 1), e.g. `mus=1.0, 0.5, 0.2`. The list may continue on the following lines. A single off-centre angle is written as e.g. `mus=0.5`. The flux is integrated over annuli whose boundaries lie halfway in projected area between adjacent angles, each weighted by its area. An explicit list of more than one value requires `DISKQUAD=0`.
 - `mus=0` skips the radiative transfer; only line and continuum opacities (`SAVE` flags 2 and 3) can then be saved.
+
+### `DISKQUAD`
+
+This keyword selects the angles and weights used to integrate the flux over the stellar disk when `MUS` gives a number of angles *N*.
+The angles are set after the whole file has been read, so `DISKQUAD` may appear before or after `MUS`.
+
+| `DISKQUAD` | &mu; angles and flux weights |
+|---|---|
+| 0 | Equal-area annuli: &mu;<sub>i</sub> = [1 - (i - 0.5)/*N*]<sup>1/2</sup>, i = 1...*N*, each with weight 1/*N* |
+| 1 (default) | Gauss-Legendre nodes &mu;<sub>i</sub> on [0, 1] with weights *w*<sub>i</sub>; the flux weight is 2*w*<sub>i</sub>&mu;<sub>i</sub> |
+| 2 | Gauss-Radau nodes on [0, 1] including &mu; = 1, with flux weights 2*w*<sub>i</sub>&mu;<sub>i</sub> |
+
+For a single angle (`mus=1`) all three give the disk centre.
+For rotational broadening, each angle represents an annulus enclosing the projected area of its flux weight.
+
+When a saved intensity file is disk-integrated afterwards (`fastspec fs_spec.bin Vsini Vmacro Vgau`), the quadrature is recognised from the stored &mu; values: Gauss-Legendre and Gauss-Radau sets receive their own weights, and any other set is integrated over annuli as for `DISKQUAD=0`.
 
 ### `CONVOL`
 
@@ -128,10 +147,11 @@ A line-opacity file (`fs_lineop.bin`) from an earlier run on the same wavelength
 - `EPSOPAC`: lines whose opacity stays below &epsilon; times the continuum opacity are skipped. Allowed range 10<sup>-6</sup> to 0.1.
 - `VWFUDGE`: multiplies the van der Waals width of lines computed with the Uns&ouml;ld approximation. Allowed range 0.1 to 100.
 
-### `H2BRD`, `MOLBRD`, `BFKURUCZ`
+### `H2BRD`, `MOLBRD`, `VWMOL`, `BFKURUCZ`
 
-- `H2BRD=1` adds molecular hydrogen to the perturbers of the van der Waals broadening.
+- `H2BRD`: multiplies the contribution of molecular hydrogen to the perturbers of the van der Waals broadening; 0 omits H<sub>2</sub>. Allowed range 0 to 10.
 - `MOLBRD=1` applies Stark and van der Waals broadening to molecular lines, when these constants are given in the line list.
+- `VWMOL`: van der Waals constant applied to all molecular lines, in the line-list convention: log<sub>10</sub>&gamma;<sub>6</sub> if negative, &gamma;<sub>6</sub> if positive. A non-zero value replaces the line-list constants and applies with or without `MOLBRD=1`. Values above 10 are not accepted.
 - `BFKURUCZ` selects the hydrogen bound-free cross-sections used with the occupation-probability treatment of hydrogen (ATLAS: 1, MARCS: 0). It matters only when a hydrogen line list is given.
 
 ### `HPROF`
@@ -149,3 +169,11 @@ The level populations, occupation probabilities and bound-free opacity do not de
 For `HPROF` 1 to 3, the profile of each line at each depth is the convolution of the Stark profile with the Doppler profile (thermal and microturbulent, including fine structure) and the Lorentz profile (natural, self- and helium broadening). Lyman &alpha; keeps the original HLINOP treatment in all modes.
 
 The tables are compiled into the code from the CDS catalogues [J/A+AS/122/285](https://cdsarc.cds.unistra.fr/viz-bin/cat/J/A+AS/122/285) ([Lemke 1997](https://ui.adsabs.harvard.edu/abs/1997A%26AS..122..285L/abstract)) and [VI/98A](https://cdsarc.cds.unistra.fr/viz-bin/cat/VI/98A) ([Stehl&eacute; & Hutcheon 1999](https://ui.adsabs.harvard.edu/abs/1999A%26AS..140...93S/abstract); with the 2007 correction of the Paschen data), and from the [STARK-H](https://stark-h.obspm.fr/) database ([Stehl&eacute; & Fouquet 2010](https://ui.adsabs.harvard.edu/abs/2010IJSp.2010E...1S/abstract)).
+
+### `HYDROSTAT`
+
+With `HYDROSTAT=1` and abundances that differ from those of the model header (set by `ABUNDANCE` or `[M/H]`), the model structure is adjusted to the new abundances.
+Each layer keeps its temperature and its continuum optical depth at the standard wavelength of the model (`WLSTD` in the model header), and the gas pressure keeps its dependence on column mass.
+The column mass of each layer is found such that the optical depth computed with the new abundances reproduces that of the model with its header abundances, and the equation of state is solved at the resulting gas pressures.
+The adjusted structure is used throughout the synthesis and is the one written to the opacity output files.
+Without an abundance change the keyword has no effect. Only plane-parallel models on a column-mass scale (`MODEL TYPE= 0`) are supported.

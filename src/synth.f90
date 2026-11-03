@@ -31,30 +31,26 @@ CONTAINS
     USE Voigt, ONLY: VoigtInit
     USE FaradayVoigt, ONLY: FVoigtInit
     USE Opacity, ONLY: XlineInit
-    USE Convol, ONLY: MuWeights
     USE Solver, ONLY: SphereInit
 
     IMPLICIT NONE
 
-    INTEGER :: i, iion, itau, itmin, ispc, Natom, Nlist, Niter, EosMode, Ierr, NaddSpc = 58
-    REAL(4), ALLOCATABLE :: PotIonC(:), XamassC(:)
+    INTEGER :: i, iion, ispc, Natom, Nlist, Ierr, IonMol, NaddSpc = 58
+    REAL(8), ALLOCATABLE :: Pgas(:)
     CHARACTER(2), PARAMETER :: HotEl(8) = (/ 'C ', 'N ', 'O ', 'Ne', 'Mg', 'Si', 'S ', 'Fe' /)
     INTEGER, PARAMETER :: HotIonlo(8) = (/ 1, 1, 1, 1, 2, 2, 2, 2 /)
     INTEGER, PARAMETER :: HotIonhi(8) = (/ 6, 6, 6, 6, 6, 6, 6, 5 /)
     INTEGER, EXTERNAL :: EqList
     REAL, DIMENSION(SIZE(Abund)) :: AbundL, AmassL
-    REAL :: Temp, Ptotal, Pelec, XnaL, XneL, RhoL
     LOGICAL :: IsMag
     REAL(8) :: EpsWl = 1d-12
-    CHARACTER(8) :: Splist(Maxspl)
+    CHARACTER(8) :: Splist(Maxspl), ElMol
     CHARACTER(64) :: MolCode 
     CHARACTER(1024) :: Msg
     CHARACTER(8), POINTER :: ElAtom(:)
     INTEGER, POINTER :: IonAtom(:), LinSpcL(:)
     CHARACTER(8), ALLOCATABLE :: ElAll(:)
     INTEGER, ALLOCATABLE :: IonAll(:)
-    CHARACTER(8) :: ElMol
-    INTEGER :: IonMol
 
     ! Compute wavelength array
     IF (Wmode == 0) THEN                          ! equidistant in wavelength
@@ -102,7 +98,16 @@ CONTAINS
         Abund(i) = 1d-30
       END IF
     END DO
-  
+
+    ! Same conversion for the model atmosphere abundances used by the hydrostatic remap
+    DO i = 1, SIZE(AbundModel)
+      IF (AbundModel(i) < 0 .AND. AbundModel(i) >= -30.) THEN
+        AbundModel(i) = 10d0**AbundModel(i)
+      ELSE IF (AbundModel(i) < -30.) THEN
+        AbundModel(i) = 1d-30
+      END IF
+    END DO
+
     ! Reclassify Type=0 line lists that are actually ASCII magnetic (.z) files
     DO i = 1, Nfiles
       IF (LineListType(i) == 0) THEN
@@ -254,19 +259,85 @@ CONTAINS
       CALL ErrStop(Msg)
     END IF
   
-    ! Solve EOS for each depth grid point
+    ! Atomic masses and arrays for the EOS results
     AmassL = REAL(Amass,4)
     ALLOCATE(Fraction(Maxspl,Ntau), FractionPF(Maxspl,Ntau), PartFunc(Maxspl,Ntau))
     ALLOCATE(PotIon(Maxspl), Xamass(Maxspl))
 
-    ! Index of the coolest layer  
+    ! Gas pressure of the model atmosphere layers
+    ALLOCATE(Pgas(Ntau))
+    Pgas = (Atmos%Xna + Atmos%Xne) * Atmos%T * Kbolt
+
+    ! Re-solve the hydrostatic structure if requested and the abundances differ from those
+    ! of the model atmosphere, otherwise solve the EOS at the model gas pressure
+    IF (HydroActive()) THEN
+      CALL HydroRemap(AbundL, AmassL, Splist, Nlist, Pgas)
+    ELSE
+      CALL EosSolve(AbundL, AmassL, Splist, Nlist, Pgas, .TRUE.)
+    END IF
+    DEALLOCATE(Pgas)
+
+    ! Compute the Voigt lookup table
+    CALL VoigtInit
+  
+    ! Compute the depth-only part of Xline
+    CALL XlineInit
+
+    ! Precompute the ray geometry for spherical radiative transfer
+    IF (Radius > 0d0 .AND. Nmu > 0) CALL SphereInit
+
+    ! Determine whether this is a polarised (magnetic) synthesis.
+    Magnetic = (MAXVAL(LineListType) == 2) .AND. BfieldSet
+
+  END SUBROUTINE Init
+
+  ! True if the hydrostatic remap applies: requested by HYDROSTAT, with abundances that differ
+  ! from those of the model atmosphere after the conversion from log to fractions used by Init
+  LOGICAL FUNCTION HydroActive()
+
+    USE Config, ONLY: Hydrostat
+    USE AtmosData, ONLY: Abund, AbundModel
+
+    REAL(8), DIMENSION(SIZE(Abund)) :: A, Am
+
+    A = Abund
+    Am = AbundModel
+    WHERE (A < 0 .AND. A >= -30.) A = 10d0**A
+    WHERE (A < -30.) A = 1d-30
+    WHERE (Am < 0 .AND. Am >= -30.) Am = 10d0**Am
+    WHERE (Am < -30.) Am = 1d-30
+    HydroActive = Hydrostat .AND. ANY(A /= Am)
+
+  END FUNCTION HydroActive
+
+  ! Solve the equation of state at every depth for the given gas pressures, updating the
+  ! electron and atom number densities and the mass density of the model atmosphere
+  SUBROUTINE EosSolve(AbundL, AmassL, Splist, Nlist, Pgas, Warn)
+
+    USE Config
+    USE Constants
+    USE AtmosData
+    USE LineData
+    USE Utils
+
+    REAL, INTENT(IN) :: AbundL(SIZE(Abund)), AmassL(SIZE(Abund))
+    CHARACTER(8), INTENT(IN) :: Splist(Maxspl)
+    INTEGER, INTENT(IN) :: Nlist
+    REAL(8), INTENT(IN) :: Pgas(Ntau)
+    LOGICAL, INTENT(IN) :: Warn
+    INTEGER :: itau, itmin, Niter, EosMode
+    REAL :: Temp, Ptotal, Pelec, XnaL, XneL, RhoL
+    CHARACTER(1024) :: Msg
+    REAL(4), ALLOCATABLE :: PotIonC(:), XamassC(:)
+
+    ! Index of the coolest layer
     itmin = MINLOC(Atmos%T, 1)
     DO itau = 1, Ntau
-      Ptotal = REAL((Atmos(itau)%Xna + Atmos(itau)%Xne) * Atmos(itau)%T * Kbolt,4)
+      Ptotal = REAL(Pgas(itau),4)
       Pelec = REAL(Atmos(itau)%Xne * Atmos(itau)%T * Kbolt,4)
       Temp = REAL(Atmos(itau)%T,4)
 
-      ! run EOS in mode 10 which starts the iteration from the model Pe. For T > 12000 K 
+      ! run EOS in mode 10 which starts the iteration from the model Pe. For T > 12000 K
       ! mode 10 would keep the model Pe instead of re-solving it, so use mode 0 there
       EosMode = MERGE(10, 0, Temp <= 12000.)
       CALL EqStat(EosMode, Temp, Ptotal, Pelec, AbundL, Elemen, AmassL, SIZE(Elemen), &
@@ -281,7 +352,7 @@ CONTAINS
       END IF
 
       ! issue warning if XNE changed by >10%
-      IF (ABS(XneL-Atmos(itau)%Xne)/Atmos(itau)%Xne > 0.1) &
+      IF (Warn .AND. ABS(XneL-Atmos(itau)%Xne)/Atmos(itau)%Xne > 0.1) &
         WRITE(*,'(I3,F0.1," XNE changed by EOS: ",ES12.5," %")') &
         itau,Temp,(XneL-Atmos(itau)%Xne)/Atmos(itau)%Xne*100
 
@@ -289,7 +360,7 @@ CONTAINS
       Atmos(itau)%Xna = REAL(XnaL,8)
       Atmos(itau)%Xne = REAL(XneL,8)
       Atmos(itau)%Rho = REAL(RhoL,8)
-    
+
       ! number densities without dividing by partition functions
       Fraction(:,itau) = FractionPF(:,itau) * PartFunc(:,itau)
 
@@ -305,22 +376,139 @@ CONTAINS
     Xamass = XamassC
     DEALLOCATE(PotIonC, XamassC)
 
-    ! Compute the Voigt lookup table
-    CALL VoigtInit
-  
-    ! Compute the depth-only part of Xline
-    CALL XlineInit
+  END SUBROUTINE EosSolve
 
-    ! Sort the mu angles and precompute the disk-integration annulus weights
-    IF (Nmu > 1 .AND. (OutFlags(1) > 0 .OR. OutFlags(5) > 0)) CALL MuWeights
+  ! Re-solve the hydrostatic structure for abundances that differ from those of the model
+  ! atmosphere: each layer keeps its temperature and its continuum optical depth at the
+  ! standard wavelength, the gas pressure follows the column mass as in the original model,
+  ! and the column mass of every layer is found such that the optical depth computed with
+  ! the new abundances reproduces that of the model with its own abundances
+  SUBROUTINE HydroRemap(AbundL, AmassL, Splist, Nlist, Pgas)
 
-    ! Precompute the ray geometry for spherical radiative transfer
-    IF (Radius > 0d0 .AND. Nmu > 0) CALL SphereInit
+    USE Config
+    USE AtmosData
+    USE Utils
+    USE Contop, ONLY: Xcont
 
-    ! Determine whether this is a polarised (magnetic) synthesis.
-    Magnetic = (MAXVAL(LineListType) == 2) .AND. BfieldSet
+    REAL, INTENT(IN) :: AbundL(SIZE(Abund)), AmassL(SIZE(Abund))
+    CHARACTER(8), INTENT(IN) :: Splist(Maxspl)
+    INTEGER, INTENT(IN) :: Nlist
+    REAL(8), INTENT(IN) :: Pgas(Ntau)
+    INTEGER :: k, iter, ihalf
+    REAL :: AbundML(SIZE(Abund))
+    REAL(8) :: Dm, Sk, Jkk, Jkm
+    REAL(8), DIMENSION(Ntau) :: Lgm0, LgPg0, Tau0, Xm, XmOld, Kap, KapOld, KapD, Beta, Res, Dx
+    CHARACTER(1024) :: Msg
+    INTEGER, PARAMETER :: MaxIter = 50
+    REAL(8), PARAMETER :: Tol = 1d-5, Dlt = 1d-2, MaxStep = 0.3d0
 
-  END SUBROUTINE Init
+    ! the remap is defined for plane-parallel models on a column-mass scale
+    IF (Motype /= 0 .OR. Radius > 0d0) &
+      CALL ErrStop('HydroRemap: HYDROSTAT requires a plane-parallel model on a column-mass scale')
+
+    ! continuum optical depth at the standard wavelength for the model abundances
+    AbundML = REAL(AbundModel,4)
+    CALL EosSolve(AbundML, AmassL, Splist, Nlist, Pgas, .FALSE.)
+    CALL ContopSetup(.TRUE.)
+    CALL Xcont(Wlstd, Kap)
+    Lgm0 = LOG(Atmos%Rhox)
+    LgPg0 = LOG(Pgas)
+    Tau0(1) = Kap(1) * Atmos(1)%Rhox
+    DO k = 2, Ntau
+      Tau0(k) = Tau0(k-1) + 0.5d0 * (Kap(k) + Kap(k-1)) * (Atmos(k)%Rhox - Atmos(k-1)%Rhox)
+    END DO
+
+    ! Newton iteration for the logarithm of the column mass of each layer
+    Xm = Lgm0
+    DO iter = 1, MaxIter
+
+      ! continuum opacity at the trial column masses with the new abundances
+      CALL RemapOpacity(AbundL, AmassL, Splist, Nlist, Lgm0, LgPg0, Xm, Kap)
+
+      ! residuals of the optical depth scale, same trapezoid rule as for the original model
+      Res(1) = LOG(Kap(1) * EXP(Xm(1)) / Tau0(1))
+      DO k = 2, Ntau
+        Res(k) = LOG((EXP(Xm(k)) - EXP(Xm(k-1))) * (Kap(k) + Kap(k-1)) / &
+          (2d0 * (Tau0(k) - Tau0(k-1))))
+      END DO
+      IF (MAXVAL(ABS(Res)) < Tol) EXIT
+
+      ! logarithmic derivative of the opacity with respect to the column mass: finite
+      ! difference in the first iteration, secant update from the previous iterate afterwards
+      IF (iter == 1) THEN
+        CALL RemapOpacity(AbundL, AmassL, Splist, Nlist, Lgm0, LgPg0, Xm + Dlt, KapD)
+        Beta = LOG(KapD / Kap) / Dlt
+      ELSE
+        DO k = 1, Ntau
+          IF (ABS(Xm(k) - XmOld(k)) > 1d-6) Beta(k) = LOG(Kap(k) / KapOld(k)) / (Xm(k) - XmOld(k))
+        END DO
+      END IF
+      Beta = MIN(MAX(Beta, -0.5d0), 2.5d0)
+
+      ! Newton step for the lower-bidiagonal Jacobian by forward substitution
+      Dx(1) = -Res(1) / (1d0 + Beta(1))
+      DO k = 2, Ntau
+        Dm = EXP(Xm(k)) - EXP(Xm(k-1))
+        Sk = Kap(k) + Kap(k-1)
+        Jkk = EXP(Xm(k)) / Dm + Kap(k) * Beta(k) / Sk
+        Jkm = -EXP(Xm(k-1)) / Dm + Kap(k-1) * Beta(k-1) / Sk
+        Dx(k) = -(Res(k) + Jkm * Dx(k-1)) / Jkk
+      END DO
+      Dx = MIN(MAX(Dx, -MaxStep), MaxStep)
+
+      ! apply the step, halving it until the column mass increases monotonically with depth
+      XmOld = Xm
+      KapOld = Kap
+      DO ihalf = 1, 10
+        Xm = XmOld + Dx
+        IF (ALL(Xm(2:Ntau) > Xm(1:Ntau-1))) EXIT
+        Dx = 0.5d0 * Dx
+      END DO
+      IF (ihalf > 10) CALL ErrStop('HydroRemap: column mass does not increase with depth')
+    END DO
+    IF (iter > MaxIter) THEN
+      WRITE(Msg, '(A, I0, A, ES9.2)') 'HydroRemap: no convergence after ', MaxIter, &
+        ' iterations, max residual ', MAXVAL(ABS(Res))
+      CALL ErrStop(Msg)
+    END IF
+
+    ! report the number of iterations
+    IF (Verbose >= 1) WRITE(*, '(I0, A)', ADVANCE='NO') iter, ' iterations :: '
+
+    ! adopt the new column-mass scale; the EOS results already correspond to it
+    Atmos%Rhox = EXP(Xm)
+
+  END SUBROUTINE HydroRemap
+
+  ! Continuum opacity at the standard wavelength for trial column masses of the hydrostatic
+  ! remap, with the gas pressure interpolated from the original model in log column mass
+  SUBROUTINE RemapOpacity(AbundL, AmassL, Splist, Nlist, Lgm0, LgPg0, Xm, Kap)
+
+    USE Config
+    USE AtmosData
+    USE Utils, ONLY: UpperBoundReal8
+    USE Contop, ONLY: Xcont
+
+    REAL, INTENT(IN) :: AbundL(SIZE(Abund)), AmassL(SIZE(Abund))
+    CHARACTER(8), INTENT(IN) :: Splist(Maxspl)
+    INTEGER, INTENT(IN) :: Nlist
+    REAL(8), INTENT(IN) :: Lgm0(Ntau), LgPg0(Ntau), Xm(Ntau)
+    REAL(8), INTENT(OUT) :: Kap(Ntau)
+    INTEGER :: i, k
+    REAL(8) :: Pg(Ntau)
+
+    ! gas pressure linear in log-log, extrapolated from the end segments beyond the model
+    DO k = 1, Ntau
+      i = MIN(MAX(UpperBoundReal8(Lgm0, Xm(k)), 1), Ntau - 1)
+      Pg(k) = EXP(LgPg0(i) + (LgPg0(i+1) - LgPg0(i)) * (Xm(k) - Lgm0(i)) / (Lgm0(i+1) - Lgm0(i)))
+    END DO
+
+    ! equation of state and continuum opacity at the standard wavelength
+    CALL EosSolve(AbundL, AmassL, Splist, Nlist, Pg, .FALSE.)
+    CALL ContopSetup(.TRUE.)
+    CALL Xcont(Wlstd, Kap)
+
+  END SUBROUTINE RemapOpacity
 
   ! Allocate and zero the magnetic Stokes opacity grid and build the Faraday-Voigt lookup table
   SUBROUTINE MagInit
@@ -353,22 +541,22 @@ CONTAINS
 
   END SUBROUTINE MagInit
 
-  ! Continuum opacity calculation
-  SUBROUTINE ContopCalc
+  ! Prepare the continuum opacity routines for the current model atmosphere and EOS results;
+  ! HbfAll keeps the full H bound-free opacity even when an H line list is loaded
+  SUBROUTINE ContopSetup(HbfAll)
 
     USE Contop
     USE Constants
     USE Config
     USE AtmosData
     USE LineData
-    USE SpecData
 
-    INTEGER :: iwl, ihel, nion
-    REAL(8) :: Copac(Ntau)
+    LOGICAL, INTENT(IN) :: HbfAll
+    INTEGER :: ihel, nion
 
     ! Allocate arrays for CONTOP subroutines
-    ALLOCATE(T(Ntau), Tlog(Ntau), Tkev(Ntau), Tk(Ntau), Hkt(Ntau), &
-             Ehvkt(Ntau), Stim(Ntau), Xne(Ntau), Xna(Ntau), Rho(Ntau))
+    IF (.NOT. ALLOCATED(T)) ALLOCATE(T(Ntau), Tlog(Ntau), Tkev(Ntau), Tk(Ntau), Hkt(Ntau), &
+                                     Ehvkt(Ntau), Stim(Ntau), Xne(Ntau), Xna(Ntau), Rho(Ntau))
 
     ! Wavelength-independent variables for continuum opacity subroutines
     T = Atmos%T                  ! Temperature
@@ -384,7 +572,7 @@ CONTAINS
     Ifop = OpFlags
 
     ! If H1 line list is loaded, change sign of H1 flag to switch off part of BF opacity that is computed by HBOP
-    IF (MINVAL(LineListType) == -1) Ifop(1) = -Ifop(1)
+    IF (MINVAL(LineListType) == -1 .AND. .NOT. HbfAll) Ifop(1) = -Ifop(1)
     
     ! Indicies for species contributing to continuum opacity
     IxH1   = IdxSpc(Ix%H1)
@@ -418,6 +606,22 @@ CONTAINS
 
     ! Precompute quantities for the continuum opacity routines
     CALL ContopInit
+
+  END SUBROUTINE ContopSetup
+
+  ! Continuum opacity calculation
+  SUBROUTINE ContopCalc
+
+    USE Contop
+    USE Config
+    USE AtmosData
+    USE SpecData
+
+    INTEGER :: iwl
+    REAL(8) :: Copac(Ntau)
+
+    ! Prepare the continuum opacity routines
+    CALL ContopSetup(.FALSE.)
 
     ! Continuum opacity at standard wavelength
     IF (Motype == 1) CALL Xcont(Wlstd, ContOpacStd)
@@ -707,7 +911,7 @@ CONTAINS
 
     ! Identify wide lines
     CALL MarkWideLines(NlinesStep, Nwide)
-    IF (Nwide > 0) WRITE(*, '(A, I0, A)', ADVANCE='NO') 'Wide lines :: ', Nwide, ' :: '
+    IF (Nwide > 0) WRITE(*, '(A, I0, A)', ADVANCE='NO') 'Wide lines: ', Nwide, ' :: '
 
     ! Initialize line index pointers
     Lstart = Nlines
@@ -1064,7 +1268,7 @@ CONTAINS
 
     ! Identify wide lines
     CALL MarkWideLines(NlinesStep, Nwide)
-    IF (Nwide > 0) WRITE(*, '(A, I0, A)', ADVANCE='NO') 'Wide lines :: ', Nwide, ' :: '
+    IF (Nwide > 0) WRITE(*, '(A, I0, A)', ADVANCE='NO') 'Wide lines: ', Nwide, ' :: '
 
     ! Initialize line index pointers
     Lstart = Nlines
@@ -1526,8 +1730,9 @@ CONTAINS
   ! Central line strength: residual intensity 1 - I(line)/I(continuum) at the line center,
   ! computed from the given central line and continuum absorption coefficient arrays. For a
   ! single mu angle the emergent intensities at that angle are compared directly; for several
-  ! mu angles both intensities are disk-integrated using the annulus area weights Wmu
-  ! precomputed by MuWeights (called in Init). No Vsini, Vmacro or Gaussian broadening is applied.
+  ! mu angles both intensities are disk-integrated using the flux weights Wmu of the
+  ! disk-integration quadrature (set by ReadInputFile). No Vsini, Vmacro or Gaussian broadening
+  ! is applied.
   SUBROUTINE LinStrCalc(Wl, LineOpacL, ContOpacL, LinStrL)
 
     USE Solver, ONLY: LocPrfPP, LocPrfSph

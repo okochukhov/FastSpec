@@ -1,5 +1,5 @@
 # code version
-VERSION = 3.2
+VERSION = 3.3
 
 # HDF-enabled gfortran compiler
 FF = h5fc
@@ -41,7 +41,7 @@ SOURCEDIR = .
 BDIR = .
 
 # set of routines to compile for normal version of the code
-SRC = shared utils eos eos_eqns eos_math ioutils contop voigt hydtab_data hydtab hydropac hestark solver opacity convol synth fastspec
+SRC = shared utils eos eos_eqns eos_math ioutils cia_data contop voigt hydtab_data hydtab hydropac hestark solver opacity convol synth fastspec
 
 # relevant object file file dependencies
 OBJ = $(addsuffix .o,$(SRC))
@@ -88,13 +88,13 @@ eos_math.o: $(EOSDIR)/eos_math.f Makefile
 
 utils.o:    shared.o
 ioutils.o:  shared.o utils.o
-contop.o:   shared.o
+contop.o:   shared.o cia_data.o
 hydropac.o: shared.o voigt.o hydtab.o
 hydtab.o:   hydtab_data.o
 hestark.o:  shared.o utils.o
 opacity.o:  shared.o utils.o voigt.o hestark.o
 solver.o:   shared.o utils.o
-convol.o:   shared.o
+convol.o:   shared.o utils.o
 synth.o:    shared.o utils.o ioutils.o contop.o voigt.o hydropac.o hestark.o solver.o opacity.o convol.o
 fastspec.o: shared.o utils.o ioutils.o opacity.o convol.o synth.o
 
@@ -104,6 +104,6 @@ clean:
 arch:
 	COPYFILE_DISABLE=1 tar --no-xattrs -cvzhf fastspec.tgz \
         Makefile shared.f90 utils.f90 ioutils.f90 opacity.f90 solver.f90 \
-        hydtab_data.f90 hydtab.f90 hydropac.f90 hestark.f90 contop.f90 \
+        hydtab_data.f90 hydtab.f90 hydropac.f90 hestark.f90 cia_data.f90 contop.f90 \
         voigt.f90 convol.f90 synth.f90 fastspec.f90 \
 	-C "$(EOSDIR)" eos.f SIZES.EOS DEFAULT.EOS eos_eqns.f eos_math.f

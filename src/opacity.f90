@@ -80,7 +80,7 @@ MODULE Opacity
       Xne = Atmos(itau)%Xne
       Vh = SQRT(2d0 * Kbolt * Temp / Mh)
       XlnNprtb(itau) = Fraction(IdxSpc(Ix%H1),itau) + 0.412265d0 * Fraction(IdxSpc(Ix%He1),itau)
-      IF (H2Brd) XlnNprtb(itau) = XlnNprtb(itau) + 0.874307d0 * Fraction(IdxSpc(Ix%Hmol),itau)
+      IF (H2Brd > 0d0) XlnNprtb(itau) = XlnNprtb(itau) + H2Brd * 0.874307d0 * Fraction(IdxSpc(Ix%Hmol),itau)
       XlnGvwprt(itau) = 17d0 * (Vh**0.6d0) * XlnNprtb(itau)
       XlnTemp6(itau) = (Temp / 1d4)**(1d0/6d0) * Xne
       XlnTemp3(itau) = (Temp / 1d4)**0.3d0 * XlnNprtb(itau)
@@ -225,6 +225,13 @@ MODULE Opacity
         Cw = 1.61d-33 * ABS(Enu4 - Enl4) / (IonL**2)
         XC%Cvdw = Cw**0.4D0
       END IF
+    END IF
+
+    ! A non-zero VWmol sets the van der Waals constant of every molecular line,
+    ! replacing the line-list value, with or without MolBrd
+    IF (IsMol .AND. VWmol > 0d0) THEN
+      XC%MdVdw = 0
+      XC%Cvdw = VWmol
     END IF
 
   END SUBROUTINE XlineSetup

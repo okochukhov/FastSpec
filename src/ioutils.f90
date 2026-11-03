@@ -29,15 +29,15 @@ MODULE IOUtils
   ! Read the input file (keyword-driven format)
   SUBROUTINE ReadInputFile
 
-    INTEGER :: i, j, Ios, NfilesAlloc, Nmu_tmp, Nflags, H2BrdF, MolBrdF, BfKurF, Itmp
+    INTEGER :: i, j, Ios, NfilesAlloc, Nmu_tmp, Nflags, MolBrdF, BfKurF, HydroF, Itmp
     CHARACTER(1024) :: Line, Key, Val, NextLine
-    LOGICAL :: HasEqual, GotNext, GotWave, GotSave, GotLines, GotModel
+    LOGICAL :: HasEqual, GotNext, GotWave, GotSave, GotLines, GotModel, SetNodes
     REAL(8) :: MH
 
     CHARACTER(1024), ALLOCATABLE :: TmpFiles(:)
     CHARACTER(64), ALLOCATABLE :: TmpCodes(:)
     INTEGER, ALLOCATABLE :: TmpTypes(:), MuPerm(:)
-    REAL(8), ALLOCATABLE :: Btmp(:)
+    REAL(8), ALLOCATABLE :: Btmp(:), Rtmp(:)
 
     ! Initialize flags for keywords
     GotWave = .FALSE.
@@ -255,22 +255,20 @@ MODULE IOUtils
           
         ELSE
         
-          ! Integer count of mu angles
+          ! Integer count of mu angles; the angles themselves are set after the whole input
+          ! file is read, according to the disk-integration quadrature
           READ(Val, *, IOSTAT=Ios) Nmu_tmp
           IF (Ios /= 0 .OR. Nmu_tmp < 0) CALL ErrStop('ReadInputFile: invalid mus value', Inpfile)
           Nmu = Nmu_tmp
-          IF (Nmu > 0) THEN
-            IF (ALLOCATED(Xmu)) DEALLOCATE(Xmu)
-            ALLOCATE(Xmu(Nmu))
-            IF (Nmu > 1) THEN
-              DO i = 1, Nmu
-                Xmu(i) = SQRT( MAX(0.0D0, 1.0D0 - (REAL(i,8) - 0.5D0) / REAL(Nmu,8)) )
-              END DO
-            ELSE
-              Xmu(1) = 1.0D0
-            END IF
-          END IF
+          IF (ALLOCATED(Xmu)) DEALLOCATE(Xmu)
         END IF
+
+      ! Disk-integration quadrature: 0 = equal-area annuli, 1 = Gauss-Legendre, 2 = Gauss-Radau
+      CASE ('DISKQUAD')
+        READ(Val, *, IOSTAT=Ios) DiskQuad
+        IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse DiskQuad value from: ' // TRIM(Val), Inpfile)
+        IF (DiskQuad < 0 .OR. DiskQuad > 2) &
+          CALL ErrStop('ReadInputFile: DiskQuad must be 0, 1 or 2 in: ' // TRIM(Val), Inpfile)
 
       ! Convolution parameters (Vsini, Vmacro, Vgau / Resolwing power)
       CASE ('CONVOL')
@@ -303,15 +301,9 @@ MODULE IOUtils
         
       ! Change H2Brd
       CASE ('H2BRD')
-        READ(Val, *, IOSTAT=Ios) H2BrdF
-        IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse H2Brd flag from: ' // TRIM(Val), Inpfile)
-        IF (H2BrdF == 1) THEN
-          H2Brd = .TRUE.
-        ELSE IF (H2BrdF == 0) THEN
-          H2Brd = .FALSE.
-        ELSE
-          CALL ErrStop('ReadInputFile: unknown H2Brd flag in: ' // TRIM(Val), Inpfile)
-        END IF
+        READ(Val, *, IOSTAT=Ios) H2Brd
+        IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse H2Brd parameter from: ' // TRIM(Val), Inpfile)
+        IF (H2Brd < 0 .OR. H2Brd > 10) CALL ErrStop('ReadInputFile: H2Brd outside reasonable range', Inpfile)
         
       ! Change MolBrd
       CASE ('MOLBRD')
@@ -324,6 +316,13 @@ MODULE IOUtils
         ELSE
           CALL ErrStop('ReadInputFile: unknown MolBrd flag in: ' // TRIM(Val), Inpfile)
         END IF
+
+      ! Change VWmol: logarithmic if negative, linear if positive, as in the line lists
+      CASE ('VWMOL')
+        READ(Val, *, IOSTAT=Ios) VWmol
+        IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse VWmol parameter from: ' // TRIM(Val), Inpfile)
+        IF (VWmol > 10) CALL ErrStop('ReadInputFile: VWmol > 10 (ABO sigma.alpha) is not supported', Inpfile)
+        IF (VWmol < 0) VWmol = 10d0**VWmol
 
       ! Change BfKurucz
       CASE ('BFKURUCZ')
@@ -348,6 +347,18 @@ MODULE IOUtils
         IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse Hprof flag from: ' // TRIM(Val), Inpfile)
         IF (Hprof < 0 .OR. Hprof > 3) CALL ErrStop('ReadInputFile: unknown Hprof flag in: ' // TRIM(Val), Inpfile)
 
+      ! Re-solve the hydrostatic structure for abundances differing from the model atmosphere
+      CASE ('HYDROSTAT')
+        READ(Val, *, IOSTAT=Ios) HydroF
+        IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse Hydrostat flag from: ' // TRIM(Val), Inpfile)
+        IF (HydroF == 1) THEN
+          Hydrostat = .TRUE.
+        ELSE IF (HydroF == 0) THEN
+          Hydrostat = .FALSE.
+        ELSE
+          CALL ErrStop('ReadInputFile: unknown Hydrostat flag in: ' // TRIM(Val), Inpfile)
+        END IF
+
       ! Unknown keyword stop
       CASE DEFAULT
         CALL ErrStop('ReadInputFile: unknown keyword: ' // TRIM(Key), Inpfile)
@@ -365,16 +376,18 @@ MODULE IOUtils
     IF (Nfiles <= 0) CALL ErrStop('ReadInputFile: no input line list files specified')
     IF (.NOT. GotModel) CALL ErrStop('ReadInputFile: missing input keyword: MODEL')
     
-    ! If MUS was omitted, build the default mu-angle grid for the default Nmu
-    IF (Nmu > 0 .AND. .NOT. ALLOCATED(Xmu)) THEN
-      ALLOCATE(Xmu(Nmu))
-      IF (Nmu > 1) THEN
-        DO i = 1, Nmu
-          Xmu(i) = SQRT( MAX(0.0D0, 1.0D0 - (REAL(i,8) - 0.5D0) / REAL(Nmu,8)) )
-        END DO
-      ELSE
-        Xmu(1) = 1.0D0
+    ! Limb angles and disk-integration weights
+    IF (Nmu > 0) THEN
+      SetNodes = .NOT. ALLOCATED(Xmu)
+      IF (SetNodes) THEN
+        ALLOCATE(Xmu(Nmu))
+      ELSE IF (DiskQuad /= 0 .AND. Nmu > 1) THEN
+        WRITE(Line, '(A, I0)') 'ReadInputFile: an explicit MUS list requires DiskQuad = 0, not ', DiskQuad
+        CALL ErrStop(TRIM(Line))
       END IF
+      ALLOCATE(Wmu(Nmu), Rtmp(Nmu + 1))
+      CALL MuQuadrature(DiskQuad, Nmu, Xmu, Wmu, Rtmp, SetNodes)
+      DEALLOCATE(Rtmp)
     END IF
 
     ! Prevent inconsistent OutFlag(1) and Nmu
@@ -1566,6 +1579,9 @@ MODULE IOUtils
 
     ! Read abundances and the number of depth points
     READ(Atmfile, *, END=5, ERR=6) Abund, Ntau
+
+    ! Keep the model atmosphere abundances for the optional hydrostatic structure correction
+    AbundModel = Abund
 
     ! Validate the number of model layers
     IF (Ntau < 3) THEN
