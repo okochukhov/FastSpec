@@ -1,0 +1,30 @@
+{
+  "title": "FastSpec: fast and versatile stellar spectrum synthesis code",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "gpl-3.0",
+  "creators": [
+    {
+      "name": "Kochukhov, Oleg",
+      "affiliation": "Uppsala University",
+      "orcid": "0000-0003-3061-4591"
+    }
+  ],
+  "description": "<p>FastSpec is a fast and versatile stellar spectrum synthesis code, written in modern Fortran and designed for both raw computational speed and broad astrophysical applicability. Working in local thermodynamic equilibrium (LTE), it computes emergent intensity and flux spectra from 1D stellar model atmospheres, and can solve the full polarised radiative transfer problem, yielding all four Stokes parameters (I, Q, U, V) in the presence of a magnetic field.</p>\n<p>The code is applicable across essentially the entire Hertzsprung-Russell diagram, from cool M dwarfs to hot B-type stars. It treats both plane-parallel and spherical model atmospheres, and synthesises atomic as well as molecular lines, handling molecular line lists that reach hundreds of millions of transitions, as needed to model the spectra of cool stars. Chemical and ionisation equilibrium is obtained from the corrected and extended SME equation-of-state package; continuum opacities follow ATLAS12; and hydrogen bound-bound and bound-free absorption use the occupation-probability formalism. The radiative transfer equation is integrated with DELO-Bezier formal solvers in both scalar and Stokes-vector form.</p>",
+  "keywords": [
+    "astronomy",
+    "spectroscopy",
+    "stellar atmospheres",
+    "spectrum synthesis",
+    "radiative transfer",
+    "spectropolarimetry"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "arXiv:2610.31763",
+      "relation": "isDescribedBy",
+      "resource_type": "publication-preprint",
+      "scheme": "arxiv"
+    }
+  ]
+}
