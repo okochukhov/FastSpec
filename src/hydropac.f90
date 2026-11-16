@@ -10,8 +10,8 @@
 ! calculations. The normalised hydrogen line profiles use the HLINOP routine, which can be used
 ! separately.
 !
-! The occupation probability formalism follows Daeppen, Anderson & Milhalas (ApJ 1987; DAM) and
-! Hummer & Milhalas (1988), with the charged-perturber term treated as in Hubeny, Hummer & Lanz
+! The occupation probability formalism follows Daeppen, Anderson & Mihalas (ApJ 1987; DAM) and
+! Hummer & Mihalas (1988), with the charged-perturber term treated as in Hubeny, Hummer & Lanz
 ! (A&A 1994; HHL). This implementation supports LTE-only level populations.
 !
 ! Provenance:
@@ -35,6 +35,16 @@
 !                HLINOP.
 !   Lyman alpha always keeps the original HLINOP treatment.
 !
+!   Changes with respect to the original HBOP (Oleg Kochukhov, 2026):
+!     - LTE level populations N(H I)/U w g exp(-E/kT) with the EOS partition function U and total
+!       H I density N(H I) Z/U for the neutral perturbers (originally N(H I) w g exp(-E/kT)/Z);
+!     - dissolved bound-free opacity cut redward of the alpha line of each series (originally
+!       tapered exponentially);
+!     - bound-free opacity at vacuum wavelengths;
+!     - red validity limit of the MARCS Gaunt factor tables as in Turbospectrum;
+!     - no line opacity for upper levels with w < 1e-4 (HPROF >= 1); REFLECT option dropped;
+!     - Lyman alpha satellite table index kept within the tables.
+!
 ! =============================================================================================
 
 ! Module containing hydrogen line opacity data, functions and subroutines
@@ -42,13 +52,14 @@ MODULE HydrOpac
 
   USE Constants
   USE Config
-  USE HydTab, ONLY: HtTabInit, HtStarkTab, HtConvolve
+  USE HydTab, ONLY: HtTabInit, HtStarkTab, HtConvolve, HtSpline
   USE Voigt, ONLY: HVoigtExact
+  USE Utils, ONLY: Vac2Air, Air2Vac
 
   IMPLICIT NONE
 
   INTEGER, PARAMETER :: NHlevels = 100, Nbf = 6
-  REAL(8) :: Ehyd(NHlevels), Conth(NHlevels), Wconth(NHlevels), Wcut(NHlevels), Fnm(NHlevels, NHlevels)
+  REAL(8) :: Ehyd(NHlevels), Conth(NHlevels), Wcut(NHlevels), Fnm(NHlevels, NHlevels)
   REAL(8), ALLOCATABLE :: WH(:,:), GH(:,:), NpH(:,:)
 
   ! =============================================================================================
@@ -100,8 +111,9 @@ MODULE HydrOpac
   ! HydTable profile store (HPROF >= 1) per (depth, line), area normalised, per Hz; side 1: Delta nu > 0
   INTEGER, PARAMETER :: HtNo = 200                      ! output detunings per side
   INTEGER, ALLOCATABLE :: HtSrc(:,:)                    ! 1 Stehle, 2 Lemke, 3 corrected HLINOP, 0 none
-  REAL(8), ALLOCATABLE :: HtLu1(:,:), HtIlr(:,:), HtLumax(:,:), HtPhi0(:,:)  ! log10 u1, 1/step, log10 umax, phi(0)
-  REAL(8), ALLOCATABLE :: HtLphi(:,:,:,:), HtTailA(:,:,:), HtTailB(:,:,:)    ! log10 phi; tails A u^-2.5 + B u^-2
+  REAL(8), ALLOCATABLE :: HtLu1(:,:), HtIlr(:,:), HtLumax(:,:), HtPhi0(:,:)  ! ln u1, 1/step in ln u, ln umax, phi(0)
+  REAL(8), ALLOCATABLE :: HtLphi(:,:,:,:), HtTailA(:,:,:), HtTailB(:,:,:)    ! ln phi; tails A u^-2.5 + B u^-2
+  REAL(4), ALLOCATABLE :: HtD2phi(:,:,:,:)              ! spline second derivatives of ln phi (per grid index) / 6
   REAL(8), PARAMETER :: HtWskip = 1.D-4                 ! no profile and no line opacity where w_up < HtWskip
 
   ! Bound-free Gaunt factor tables (filled by HbfInit): wavelength nodes, log10 Gaunt factors,
@@ -258,14 +270,14 @@ CONTAINS
   ! Initialise all hydrogen line opacity data in a single pass: first the level energies,
   ! oscillator strengths and LTE level populations (formerly the separate Hinit), then all
   ! line-, depth- and (line,depth)-dependent quantities used by Hbop. Must be called before the
-  ! first call to Hbop. The Hbop table size is ~2 MB for ~300 lines and ~100 depths.
+  ! first call to Hbop.
   !
   ! nl    = number of hydrogen lines
   ! nlo   = array of lower principal quantum numbers
   ! nup   = array of upper principal quantum numbers
   ! waveh = array of central wavelengths in A
   ! ntau  = number of depth points
-  ! nh    = number density of H I in cm-3
+  ! nh    = number density of H I divided by its partition function in cm-3
   ! nhe   = number density of He I in cm-3
   ! ne    = electron number density in cm-3
   ! t     = kinetic temperature in K
@@ -275,8 +287,8 @@ CONTAINS
     INTEGER, INTENT(IN) :: Nlo(Nl), Nup(Nl)
     REAL(8), INTENT(IN) :: Waveh(Nl), Nh(Ntau), Nhe(Ntau), Ne(Ntau), T(Ntau), Dop(Ntau)
 
-    INTEGER :: L, itau, i, j, k, N, M, Mmn, Ifins, Ipos
-    REAL(8) :: T4, T43, Xne16, Pp, A, Kt, Z, Wge(NHlevels)
+    INTEGER :: L, itau, i, j, k, N, M, Mmn, Ifins, Ipos, iter
+    REAL(8) :: T4, T43, Xne16, Pp, A, Kt, Z, Wge(NHlevels), Nhtot(Ntau)
     REAL(8) :: Xn, Xn2, Xm, Xm2, Xmn2, Xm2mn2, Gnm, Xknm, Freqnm, Redcut, Bluecut
     REAL(8) :: Radamp, Resont0, Resont, Vdw, StarkR, Vbarh, Hwlor, Hwstk
     REAL(8) :: Y1num, Y1wht, C1con, C2con, Wty1, Y1scal, C1, C2, G1
@@ -350,7 +362,7 @@ CONTAINS
       & 4.D0, 4.D0, 4.D0, 5.D0 ]
 
     INTEGER, PARAMETER :: Istal(4) = [ 1, 3, 10, 21 ]
-    REAL(8), PARAMETER :: Lnghal(4) = [ 2.D0, 7.D0, 11.D0, 14.D0 ]
+    INTEGER, PARAMETER :: Lnghal(4) = [ 2, 7, 11, 14 ]
 
     !  Fine structure for M.EQ.INFINITY IN FREQ*10**-7
     REAL(8), PARAMETER :: Stcomp(5,4) = RESHAPE([ &
@@ -412,7 +424,6 @@ CONTAINS
 
     DO i = 1, NHlevels
       Conth(i) = 109678.764D0 - Ehyd(i)
-      Wconth(i) = VacAir(1.D8 / Conth(i))
     END DO
 
     ! Red cutoff wavelengths in Angstroms.
@@ -438,18 +449,22 @@ CONTAINS
       END DO
     END DO
 
-    ! Partition function and population array NP for all levels and all depths
+    ! Level populations Nh*w*g*exp(-E/kT) and total H I density Nh*Z for all depths
     DO itau = 1, Ntau
-      Z = 0.D0
       Kt = Kbolt * T(itau)
-      DO i = 1, NHlevels
-        WH(i,itau) = Wcalc(Nh(itau), Ne(itau), Nhe(itau), DBLE(i), T(itau))
-        GH(i,itau) = 2.D0*DBLE(i)*DBLE(i)
-        Wge(i) = WH(i,itau)*GH(i,itau)*EXP(-Hcc*Ehyd(i)/Kt)
-        Z = Z + Wge(i)
+      Nhtot(itau) = 2.D0*Nh(itau)
+      DO iter = 1, 2
+        Z = 0.D0
+        DO i = 1, NHlevels
+          WH(i,itau) = Wcalc(Nhtot(itau), Ne(itau), Nhe(itau), DBLE(i), T(itau))
+          GH(i,itau) = 2.D0*DBLE(i)*DBLE(i)
+          Wge(i) = WH(i,itau)*GH(i,itau)*EXP(-Hcc*Ehyd(i)/Kt)
+          Z = Z + Wge(i)
+        END DO
+        Nhtot(itau) = Nh(itau)*Z
       END DO
       DO i = 1, NHlevels
-        NpH(i,itau) = Nh(itau)*Wge(i)/Z
+        NpH(i,itau) = Nh(itau)*Wge(i)
       END DO
     END DO
 
@@ -505,7 +520,7 @@ CONTAINS
         HbBetacD(itau) = 0.D0
       END IF
 
-      HbNh(itau) = Nh(itau)
+      HbNh(itau) = Nhtot(itau)
       HbNhe(itau) = Nhe(itau)
       HbNp1(itau) = NpH(1,itau)
       HbXne(itau) = Ne(itau)
@@ -556,14 +571,14 @@ CONTAINS
       ! other lines are zero there). Blue cutoff: at the appropriate continuum edge.
       Redcut = Wcut(N)
       IF (Cutnext .AND. (Mmn /= 1)) Redcut = 1.D8 / (Ehyd(M-1) - Ehyd(N))
-      IF (.NOT. Ifvac) Redcut = Vacair(Redcut)
+      IF (.NOT. Ifvac) Redcut = Vac2Air(Redcut)
       HbRedcut(L) = Redcut
       IF (Cutnext) THEN
         Bluecut = 1.D8 / (Ehyd(M+1) - Ehyd(N))
       ELSE
         Bluecut = 1.D8 / Conth(N)
       END IF
-      IF (.NOT. Ifvac) Bluecut = Vacair(Bluecut)
+      IF (.NOT. Ifvac) Bluecut = Vac2Air(Bluecut)
       HbBluecut(L) = Bluecut
 
       ! Natural damping taken from tables dnu/ nu_0 = 1/2 * 1/nu_0 * 1/2 pi * Gamma
@@ -720,7 +735,7 @@ CONTAINS
     IF (ALLOCATED(HbWaveh)) DEALLOCATE(HbWaveh, HbFreqnm, HbRedcut, HbBluecut, HbCore, &
       HbFinest, HbFinswt, HbIfins, HbIndx, HbAlpha, HbLya, HbPopf, HbHfwid, HbNwid, &
       HbHwlFn, HbDopIn, HbC1, HbC2, HbG1, HbGamS, HbBfac)
-    IF (ALLOCATED(HtSrc)) DEALLOCATE(HtSrc, HtLu1, HtIlr, HtLumax, HtPhi0, HtLphi, HtTailA, HtTailB)
+    IF (ALLOCATED(HtSrc)) DEALLOCATE(HtSrc, HtLu1, HtIlr, HtLumax, HtPhi0, HtLphi, HtD2phi, HtTailA, HtTailB)
     HbNtau = 0
     HbNlin = 0
     HbLyaRadFn = 0.D0
@@ -743,7 +758,7 @@ CONTAINS
   !           populations and occupation probabilities. Must be larger or
   !           equal to the highest level in the line list.
   ! nbf     = highest level for which the bound-free component is
-  !           accounted for (limited to 15 at present).
+  !           accounted for (6 at present).
   !
   ! original Fortran77 code by Paul Barklem (https://github.com/barklem/hlinop)
   ! adapted to Fortran90 by Oleg Kochukhov (Dec 2025-Jun 2026)
@@ -757,8 +772,8 @@ CONTAINS
     REAL(8), PARAMETER :: Ionh = Hie / erg2ev
     REAL(8), PARAMETER :: A0cm = A0 * 1D2
     REAL(8) :: Estim(HbNtau)
-    REAL(8) :: X, Ns2, Ns4, Rih, X1, X2, X13, X23, K, KNs4, Taper, HbfW
-    REAL(8) :: Neutr, Wneutr, Betac, F, Wion, D, Chi
+    REAL(8) :: X, Ns2, Ns4, Rih, X1, X2, X13, X23, K, KNs4, HbfW
+    REAL(8) :: Neutr, Wneutr, Betac, F, Wion, D, Chi, Wvc
 
     ! Line opacity components
     Total = 0.D0
@@ -774,21 +789,25 @@ CONTAINS
     ! the bound-free jump, particularly from the Lyman continuum in cool stars.
     ! This is certainly unphysical as the extrapolation will be invalid
     ! for such cases (which corresponds basically to H2+ if the perturber
-    ! is a proton).  An arbitrary tapering is applied redward of the alpha line.
+    ! is a proton).  The dissolved contribution is cut redward of the alpha line.
+    Wvc = Air2Vac(Wave)
     DO itau = 1, HbNtau
-      Estim(itau) = EXP(-Hcc/(Wave*1.D-8)/HbKt(itau))
+      Estim(itau) = EXP(-Hcc/(Wvc*1.D-8)/HbKt(itau))
     END DO
     Contin = 0.D0
     DO i = 1, Nbf
 
-      ! Bound-free cross section and red taper: wavelength and level dependent only.
-      ! Optionally use the ATLAS/Kurucz (COULX) parameterisation instead of the MARCS tables.
+      ! No dissolved contribution redward of the alpha line
+      IF (Wvc > BfRedcut(i)) CYCLE
+
+      ! Bound-free cross section: wavelength and level dependent only.
+      ! MARCS tables (default) or the ATLAS/Kurucz (COULX) parameterisation.
       IF (BfKurucz) THEN
-        HbfW = HbfKurucz(Wave, i)
+        HbfW = HbfKurucz(Wvc, i)
       ELSE
-        HbfW = HbfMarcs(Wave, i)
+        HbfW = HbfMarcs(Wvc, i)
       END IF
-      X = 1.D0/(DBLE(i)*DBLE(i)) - Hcc/(Wave*1.D-8*Ionh)
+      X = 1.D0/(DBLE(i)*DBLE(i)) - Hcc/(Wvc*1.D-8*Ionh)
       IF (X > 0.D0) THEN
 
         ! Effective quantum number of the state dissolving to this wavelength and the
@@ -804,8 +823,6 @@ CONTAINS
         K = 1.D0
         IF (X > 3.D0) K = 5.33333333D0*X/(X + 1.D0)/(X + 1.D0)
         KNs4 = K/Ns4
-        Taper = 1.D0
-        IF (Wave > BfRedcut(i)) Taper = EXP((BfRedcut(i) - Wave)*1.D-2)
 
         DO itau = 1, HbNtau
 
@@ -824,7 +841,7 @@ CONTAINS
             Wion = 1.D0
           END IF
           D = 1.D0 - Wion*Wneutr/WH(i,itau)
-          Chi = (NpH(i,itau) - NpH(i,itau)*Estim(itau)) * D * HbfW * Taper
+          Chi = (NpH(i,itau) - NpH(i,itau)*Estim(itau)) * D * HbfW
           Contin(itau) = Contin(itau) + Chi
         END DO
       ELSE
@@ -890,9 +907,9 @@ CONTAINS
     REAL(8), INTENT(IN) :: Wave, Weight
     REAL(8), INTENT(INOUT) :: Line(HbNtau)
 
-    INTEGER :: i, itau, nf, Nw, Icut
+    INTEGER :: i, itau, nf, Nw, Icut, Side
     LOGICAL :: Lya, DoCore, RedSide, LyNear, LySat, LyRed, Far
-    REAL(8) :: Delw, AbsDelw, Freq, Freqnm, Del, AbsDel, Freqsq, Frat2, Asq, Del2
+    REAL(8) :: Delw, AbsDelw, Freq, Freqnm, Del, AbsDel, Freqsq, Frat2, Asq, Del2, Lad, Bz
     REAL(8) :: SqrtWrat, ClFq2, AbsHcDel, AbsDelwO62, Spacing, Gridfreq
     REAL(8) :: Dfine(14), XnatW, XlyH2W, XlyPW, Xfac, Xlymanh2, Xlymanh2plus
     REAL(8) :: Freq22000, Freq15000, Htot, Hhw, DopIn, Pf, Xst, D
@@ -1015,7 +1032,7 @@ CONTAINS
         IF (Freq < Freq22000) THEN
           Xlymanh2 = (Lymanh2(2) - Lymanh2(1))/Spacing*(Freq - Freq22000) + Lymanh2(1)
         ELSE
-          Icut = INT( (Freq - Freq22000)/Spacing )
+          Icut = MIN(INT( (Freq - Freq22000)/Spacing ), 89)
           Gridfreq = DBLE(Icut)*Spacing + Freq22000
           Xlymanh2 = (Lymanh2(Icut+2) - Lymanh2(Icut+1))/Spacing*(Freq - Gridfreq) + Lymanh2(Icut+1)
         END IF
@@ -1029,7 +1046,7 @@ CONTAINS
         IF (Freq < Freq15000) THEN
           Xlymanh2plus = (Lymanh2plus(2) - Lymanh2plus(1))/Spacing*(Freq - Freq15000) + Lymanh2plus(1)
         ELSE
-          Icut = INT( (Freq - Freq15000)/Spacing )
+          Icut = MIN(INT( (Freq - Freq15000)/Spacing ), 109)
           Gridfreq = DBLE(Icut)*Spacing + Freq15000
           Xlymanh2plus = (Lymanh2plus(Icut+2) - Lymanh2plus(Icut+1))/Spacing*(Freq - Gridfreq) + Lymanh2plus(Icut+1)
         END IF
@@ -1038,14 +1055,20 @@ CONTAINS
     END IF
 
     ! HydTable: stored profile, red wing times the Boltzmann factor (Stehle 1994, eq. 7); none if HtSrc = 0
+    ! The logarithm of the detuning is the same at all depths; the Boltzmann factor enters HtEval as
+    ! the exponent Bz
     IF (Hprof >= 1 .AND. .NOT. Lya) THEN
+      Side = 1
+      IF (RedSide) Side = 2
+      Lad = 0.D0
+      IF (AbsDel > 0.D0) Lad = LOG(AbsDel)
+      Bz = 0.D0
       DO itau = 1, HbNtau
         Pf = HbPopf(itau,L)
         IF (Pf == 0.D0) CYCLE
         IF (HtSrc(itau,L) == 0) CYCLE
-        Htot = HtEval(itau, L, Del)
-        IF (RedSide) Htot = Htot*EXP(-AbsHcDel/HbKt(itau))
-        Line(itau) = Line(itau) + Weight*Pf*Htot
+        IF (RedSide) Bz = -AbsHcDel/HbKt(itau)
+        Line(itau) = Line(itau) + Weight*Pf*HtEval(itau, L, Side, AbsDel, Lad, Bz)
       END DO
       RETURN
     END IF
@@ -1169,8 +1192,8 @@ CONTAINS
 
     CALL HtTabInit
     ALLOCATE(HtSrc(HbNtau,HbNlin), HtLu1(HbNtau,HbNlin), HtIlr(HbNtau,HbNlin), HtLumax(HbNtau,HbNlin), &
-             HtPhi0(HbNtau,HbNlin), HtLphi(HtNo,2,HbNtau,HbNlin), HtTailA(2,HbNtau,HbNlin), &
-             HtTailB(2,HbNtau,HbNlin))
+             HtPhi0(HbNtau,HbNlin), HtLphi(HtNo,2,HbNtau,HbNlin), HtD2phi(HtNo,2,HbNtau,HbNlin), &
+             HtTailA(2,HbNtau,HbNlin), HtTailB(2,HbNtau,HbNlin))
     HtSrc = 0
 
     !$OMP PARALLEL DO COLLAPSE(2) SCHEDULE(DYNAMIC) DEFAULT(SHARED) PRIVATE(L, itau)
@@ -1197,7 +1220,7 @@ CONTAINS
     REAL(8), PARAMETER :: Sqrtpi = SQRT(Pi), Lr03 = 0.03D0*2.30258509299404568D0
     REAL(8), ALLOCATABLE :: U(:), S(:), Z(:), V(:)
     REAL(8) :: S0, Ktail, sigma, gam, nu0, lam0, wv, umax, u1, r, a, fmin, fmax, zc1, zc2
-    REAL(8) :: dz, zmax, uo(HtNo), phip(HtNo), phim(HtNo), phi0, lr, b, uu, sarea
+    REAL(8) :: dz, zmax, uo(HtNo), phip(HtNo), phim(HtNo), phi0, lr, b, uu, xj(HtNo), d2(HtNo)
     INTEGER :: Nu, src, nf, nc, nw, nk, i, j, side
     LOGICAL :: sym
 
@@ -1217,7 +1240,6 @@ CONTAINS
       src = 3
     END IF
     lr = LOG(U(2)/U(1))
-    sarea = 2.D0*HtAreaGeoLocal(Nu, U, S0, S, Ktail)          ! area of the Stark profile used
     ! output extent: at least 0.1 nu0 and 50 half widths at half maximum of the Stark profile
     DO j = 1, Nu
       IF (S(j) < 0.5D0*S0) EXIT
@@ -1259,59 +1281,66 @@ CONTAINS
       uo(j) = u1*EXP(r*DBLE(j - 1))
     END DO
     sym = (nf == 1)
-    CALL HtConvolve(Nu, U, lr, S0, S, Ktail, nk, Z, V, MAX(ABS(zc1), ABS(zc2)), gam/Pi, HtNo, uo, sym, &
-                    phi0, phip, phim)
+    CALL HtConvolve(Nu, U, lr, S0, S, Ktail, nk, Z, V, gam/Pi, HtNo, uo, sym, phi0, phip, phim)
 
-    ! ---- store: log10 phi; tails A u^-2.5 + B u^-2 continuous at umax (B: Lorentz wing x Stark area)
+    ! ---- store: ln phi and its natural cubic spline over the grid index; tails A u^-2.5 + B u^-2
+    ! continuous at umax (B: Lorentz wing)
+    DO j = 1, HtNo
+      xj(j) = DBLE(j)
+    END DO
     HtSrc(itau,L) = src
-    HtLu1(itau,L) = LOG10(u1)
-    HtIlr(itau,L) = 1.D0/(r/LOG(10.D0))
-    HtLumax(itau,L) = LOG10(uo(HtNo))
+    HtLu1(itau,L) = LOG(u1)
+    HtIlr(itau,L) = 1.D0/r
+    HtLumax(itau,L) = LOG(uo(HtNo))
     HtPhi0(itau,L) = phi0
     DO side = 1, 2
       IF (side == 1) THEN
-        HtLphi(:,1,itau,L) = LOG10(MAX(phip, 1.D-300))
+        HtLphi(:,1,itau,L) = LOG(MAX(phip, 1.D-300))
       ELSE
-        HtLphi(:,2,itau,L) = LOG10(MAX(phim, 1.D-300))
+        HtLphi(:,2,itau,L) = LOG(MAX(phim, 1.D-300))
       END IF
-      b = gam/Pi*sarea
+      CALL HtSpline(HtNo, xj, HtLphi(:,side,itau,L), 0.D0, 0.D0, d2)
+      HtD2phi(:,side,itau,L) = REAL(d2/6.D0, 4)
+      b = gam/Pi
       uu = uo(HtNo)
       HtTailB(side,itau,L) = b
-      HtTailA(side,itau,L) = MAX(0.D0, (10.D0**HtLphi(HtNo,side,itau,L) - b/(uu*uu))*uu**2.5D0)
-      IF (HtTailA(side,itau,L) == 0.D0) HtTailB(side,itau,L) = 10.D0**HtLphi(HtNo,side,itau,L)*uu*uu
+      HtTailA(side,itau,L) = MAX(0.D0, (EXP(HtLphi(HtNo,side,itau,L)) - b/(uu*uu))*uu**2.5D0)
+      IF (HtTailA(side,itau,L) == 0.D0) HtTailB(side,itau,L) = EXP(HtLphi(HtNo,side,itau,L))*uu*uu
     END DO
   END SUBROUTINE HtBuild1
 
-  ! Stored profile at Delta nu = Del (Hz): linear below u1, log-log on the grid, tails beyond
-  REAL(8) FUNCTION HtEval(itau, L, Del)
-    INTEGER, INTENT(IN) :: itau, L
-    REAL(8), INTENT(IN) :: Del
-    INTEGER :: side, j
-    REAL(8) :: ad, f, lad
-    side = 1
-    IF (Del < 0.D0) side = 2
-    ad = ABS(Del)
-    IF (ad <= 0.D0) THEN
+  ! Stored profile at |Delta nu| = Ad (Hz) on side Side (1: Delta nu > 0, 2: < 0), multiplied by
+  ! EXP(Bz): linear below u1, cubic spline of ln phi against ln u on the grid, tails beyond.
+  ! Lad = LOG(Ad) is supplied by the caller, as it is the same at all depths (not used for Ad = 0).
+  REAL(8) FUNCTION HtEval(itau, L, Side, Ad, Lad, Bz)
+    INTEGER, INTENT(IN) :: itau, L, Side
+    REAL(8), INTENT(IN) :: Ad, Lad, Bz
+    INTEGER :: j
+    REAL(8) :: f, a
+    IF (Ad <= 0.D0) THEN
       HtEval = HtPhi0(itau,L)
+      IF (Bz /= 0.D0) HtEval = HtEval*EXP(Bz)
       RETURN
     END IF
-    lad = LOG10(ad)
-    f = (lad - HtLu1(itau,L))*HtIlr(itau,L)
+    f = (Lad - HtLu1(itau,L))*HtIlr(itau,L)
     IF (f <= 0.D0) THEN
-      HtEval = HtPhi0(itau,L) + (10.D0**HtLphi(1,side,itau,L) - HtPhi0(itau,L))*ad/10.D0**HtLu1(itau,L)
-    ELSE IF (lad >= HtLumax(itau,L)) THEN
-      HtEval = HtTailA(side,itau,L)*ad**(-2.5D0) + HtTailB(side,itau,L)/(ad*ad)
+      HtEval = HtPhi0(itau,L) + (EXP(HtLphi(1,Side,itau,L)) - HtPhi0(itau,L))*Ad*EXP(-HtLu1(itau,L))
+      IF (Bz /= 0.D0) HtEval = HtEval*EXP(Bz)
+    ELSE IF (Lad >= HtLumax(itau,L)) THEN
+      HtEval = (HtTailA(Side,itau,L)/SQRT(Ad) + HtTailB(Side,itau,L))/(Ad*Ad)
+      IF (Bz /= 0.D0) HtEval = HtEval*EXP(Bz)
     ELSE
       j = MIN(INT(f) + 1, HtNo - 1)
       f = f - DBLE(j - 1)
-      HtEval = 10.D0**(HtLphi(j,side,itau,L) + (HtLphi(j+1,side,itau,L) - HtLphi(j,side,itau,L))*f)
+      a = 1.D0 - f
+      HtEval = EXP(a*HtLphi(j,Side,itau,L) + f*HtLphi(j+1,Side,itau,L) + a*(a*a - 1.D0)*HtD2phi(j,Side,itau,L) + &
+                   f*(f*f - 1.D0)*HtD2phi(j+1,Side,itau,L) + Bz)
     END IF
   END FUNCTION HtEval
 
   ! Corrected HLINOP Stark profile per Hz at depth itau: the quasistatic part Q(beta) = Prqs (1 + Fns)
   ! (ion Holtsmark profile and quasistatic electrons, Griem 1960, 1967, as in StarkPt) convolved with
-  ! the electron-impact profile FF(z) = Gam(z)/pi/(Gam(z)^2 + z^2), as in Korg
-  ! (hydrogen_line_absorption.jl) and SMElib 6.13.18 (STARK1CONV).  beta = |Delta lambda|/(F0 K_nm)
+  ! the electron-impact profile FF(z) = Gam(z)/pi/(Gam(z)^2 + z^2).  beta = |Delta lambda|/(F0 K_nm)
   ! with the central Jacobian Delta lambda = lambda0^2 Delta nu / c.
   ! Alpha lines (HbIndx 1, 3, 5): HLINOP's S(beta) tables hold only the Stark-shifted components; the
   ! unshifted ones are added as FF itself: S = Q (x) FF + max(0, 1 - area(Q)) FF.  Other lines:
@@ -1386,7 +1415,7 @@ CONTAINS
         F(j) = g/Pi/(g*g + Z(j)*Z(j))
       END DO
       g = GamImp(itau, L, zmax)
-      CALL HtConvolve(nb, B, lr, q0, Q, kq, nk, Z, F, zc, g/Pi, nb, B, .TRUE., p0, phip, phim)
+      CALL HtConvolve(nb, B, lr, q0, Q, kq, nk, Z, F, g/Pi, nb, B, .TRUE., p0, phip, phim)
       ! unshifted components of the alpha lines: the impact profile itself
       IF (fun > 0.D0) THEN
         p0 = p0 + fun/(Pi*gs)
@@ -1835,7 +1864,7 @@ CONTAINS
   END FUNCTION Wcalc
 
   ! =============================================================================================
-  ! Fills the bound-free Gaunt factor tables used by Hbf: wavelength nodes BfL, log10 of the
+  ! Fills the bound-free Gaunt factor tables used by HbfMarcs: wavelength nodes BfL, log10 of the
   ! Gaunt factors BfGl (precomputed once instead of at every interpolation), the red validity
   ! limits BfGate (Turbospectrum correction: level n is only used blueward of the last
   ! tabulated point of level n+1) and the n^5 divisors BfN5.
@@ -2013,7 +2042,7 @@ CONTAINS
 
   ! =============================================================================================
   ! Alternative ATLAS/Kurucz bound-free cross section due to H in level NLO at wavelength WAVE
-  ! (in Angstroms), selected by the BfKurucz flag in place of Hbf. This is the ATLAS9 hydrogenic
+  ! (in Angstroms), selected by the BfKurucz flag in place of HbfMarcs. This is the ATLAS9 hydrogenic
   ! Coulomb cross section (COULX) with a polynomial bound-free Gaunt factor fit. As in the
   ! original HBOP (HBF_KURUCZ), the threshold cutoff is removed so the cross section extends
   ! redward of the bound-free edges - as required by the occupation probability formalism that
@@ -2036,36 +2065,5 @@ CONTAINS
     HbfKurucz = 0.2815D0 / Freq1 / Freq1 / Freq1 / REAL(Nlo**5, 8) * (Z**4)
     HbfKurucz = HbfKurucz * (A(Nlo) + (B(Nlo) + C(Nlo) * (Z * Z / Freq1)) * (Z * Z / Freq1))
   END FUNCTION HbfKurucz
-
-  ! =============================================================================================
-  ! Air to vacuum wavelength conversion
-  REAL(8) FUNCTION AirVac(W)
-    REAL(8), INTENT(IN) :: W
-    REAL(8) :: Waven, Wnew
-
-    ! W is air wavelength in Angstroms. WAVEN is air wavenumber which is
-    ! usually good enough, must iterate for exact solution
-    Waven = 1.0D8 / W
-    Wnew = W * (1.0000834213D0 + 2406030.0D0 / (1.30D10 - Waven**2) &
-           + 15997.0D0 / (3.89D9 - Waven**2))
-    Waven = 1.0D8 / Wnew
-    Wnew = W * (1.0000834213D0 + 2406030.0D0 / (1.30D10 - Waven**2) &
-           + 15997.0D0 / (3.89D9 - Waven**2))
-    Waven = 1.0D8 / Wnew
-    AirVac = W * (1.0000834213D0 + 2406030.0D0 / (1.30D10 - Waven**2) &
-             + 15997.0D0 / (3.89D9 - Waven**2))
-  END FUNCTION AirVac
-
-  ! =============================================================================================
-  ! Vacuum to air wavelength conversion
-  REAL(8) FUNCTION VacAir(W)
-    REAL(8), INTENT(IN) :: W
-    REAL(8) :: Waven
-
-    ! W is vacuum wavelength in Angstroms
-    Waven = 1.0D8 / W
-    VacAir = W / (1.0000834213D0 + 2406030.0D0 / (1.30D10 - Waven**2) &
-             + 15997.0D0 / (3.89D9 - Waven**2))
-  END FUNCTION VacAir
 
 END MODULE HydrOpac

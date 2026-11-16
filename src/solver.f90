@@ -59,7 +59,7 @@ MODULE Solver
     ! loop over the rays
     DO im = 1, Nmu
 
-      ! disk-center rays with mu = 0 are tangent to the surface and carry no information
+      ! limb rays with mu = 0 are tangent to the surface and carry no information
       IF (Xmu(im) <= 0d0) CALL ErrStop('SphereInit: mu = 0 rays are unsupported for spherical models')
 
       ! impact parameter of this ray
@@ -125,17 +125,21 @@ MODULE Solver
     INTEGER, INTENT(IN) :: Nmu, Ntau
     REAL(8), INTENT(IN) :: Xmu(Nmu), Xki(Ntau), Src(Ntau), Rhox(Ntau)
     REAL(8), INTENT(OUT) :: Ploc(Nmu)
-    REAL(8) :: Srd(Ntau), Deltau(Ntau), Dtau, Dtau2, Idtau2, Eps, Alpha, Beta, Gamma, U, Y
+    REAL(8) :: Srd(Ntau), Deltau(Ntau), U(Ntau), Dtau, Dtau2, Idtau2, Eps, Alpha, Beta, Gamma, Y, Imu
     INTEGER :: im, k, k1
+
+    ! steps in the monochromatic optical depth scale and source function derivative at mu = 1
+    CALL TauStep(Rhox, Xki, 1d0, Ntau, Deltau)
+    CALL CentDer(Deltau, Src, 1, Ntau, Srd)
+
+    ! Bezier control point term, independent of mu
+    DO k = 1, Ntau - 1
+      U(k) = 0.5D0 * (Src(k) + 0.5D0 * Deltau(k) * Srd(k) + Src(k+1) - 0.5D0 * Deltau(k) * Srd(k+1))
+    END DO
 
     ! Loop over limb angles
     DO im = 1, Nmu
-
-      ! steps in the monochromatic optical depth scale
-      CALL TauStep(Rhox, Xki, Xmu(im), Ntau, Deltau)
-
-      ! derivative of the source function
-      CALL CentDer(Deltau, Src, 1, Ntau, Srd)
+      Imu = 1D0 / Xmu(im)
 
       ! boundary condition
       Y = Src(Ntau)
@@ -143,7 +147,7 @@ MODULE Solver
       ! main loop of DELO integrator
       DO k = Ntau - 1, 1, -1
         k1 = k + 1
-        Dtau = Deltau(k)
+        Dtau = Deltau(k) * Imu
         Dtau2 = Dtau * Dtau
         Idtau2 = 1.0D0 / Dtau2
 
@@ -165,8 +169,7 @@ MODULE Solver
         END IF
 
         ! integration
-        U = 0.5D0 * (Src(k) + 0.5D0 * Dtau * Srd(k) + Src(k1) - 0.5D0 * Dtau * Srd(k1))
-        Y = Y * Eps + Alpha * Src(k) + Beta * Src(k1) + Gamma * U
+        Y = Y * Eps + Alpha * Src(k) + Beta * Src(k1) + Gamma * U(k)
       END DO
 
       ! spectral intensity at this limb angle

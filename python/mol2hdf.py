@@ -3,7 +3,7 @@
 mol2hdf.py -- convert a molecular line list in Turbospectrum ASCII format
 into the HDF5 file read by FastSpec.
 
-    group /Lines : one 1-D dataset per column {W:f8, E:f4, LGGF:f4, GU:f4,
+    group /Lines : one 1-D dataset per column {W:f8, E:f4, LGGF:f4,
                    GRAD:f4}, all sorted in wavelength.  Payload columns are
                    chunked + shuffled + gzip-compressed; W is left contiguous
                    (uncompressed) so the reader's full-column bound scan is a
@@ -41,13 +41,13 @@ import sys
 import numpy as np
 import h5py
 
-FORMAT_VERSION = 'm-1.0'     # FastSpec HDF5 format version
+FORMAT_VERSION = 'm-1.1'     # FastSpec HDF5 format version
 
 # Columns of the line list, read in file order.  The output is a columnar
 # (struct-of-arrays) HDF5 layout: one compressed dataset per column under a
 # /Lines group.  The in-memory dtype below is only used to parse the input.
 LINE_DTYPE = np.dtype([('W', '<f8'), ('E', '<f4'), ('LGGF', '<f4'),
-                       ('GU', '<f4'), ('GRAD', '<f4')])
+                       ('GRAD', '<f4')])
 
 # Chunking + compression for the per-column datasets.  W is monotonic and the
 # f4 columns are smooth, so shuffle+gzip compresses them well; chunking also
@@ -170,7 +170,7 @@ def read_ts(infile):
                     # gu (as in IDL, where the struct fields are floats).
                     grad = 6.669e15 * 10.0 ** float(np.float32(lggf)) \
                         / (float(np.float32(gu)) * w * w)
-                lines[i] = (w, e, lggf, gu, grad)
+                lines[i] = (w, e, lggf, grad)
     except EOFError:
         raise TSFormatError(
             '{}: compressed file is truncated or corrupt.'.format(infile))
@@ -212,7 +212,6 @@ COLUMN_UNITS = {
     'W':    'Angstrom (air or vacuum per the WL_VAC attribute)',
     'E':    'eV (lower-level excitation energy)',
     'LGGF': 'log10(gf) (dimensionless)',
-    'GU':   'dimensionless (upper-level statistical weight)',
     'GRAD': '1/s (radiative damping constant, linear)',
 }
 

@@ -1,6 +1,6 @@
 # FastSpec
 
-[FastSpec](https://arxiv.org/abs/2610.31763) is a fast and versatile stellar spectrum synthesis code, written in modern Fortran and designed for both raw computational speed and broad astrophysical applicability.
+[FastSpec](https://doi.org/10.1051/0004-6361/202662504) is a fast and versatile stellar spectrum synthesis code, written in modern Fortran and designed for both raw computational speed and broad astrophysical applicability.
 Working in local thermodynamic equilibrium (LTE), it computes emergent intensity and flux spectra from 1D stellar model atmospheres, and can solve the full polarised radiative transfer problem, yielding all four Stokes parameters (I, Q, U, V) in the presence of a magnetic field.
 
 The code is applicable across essentially the entire Hertzsprung-Russell diagram, from cool M dwarfs to hot B-type stars.
@@ -74,7 +74,7 @@ The `python/` directory contains a reader and a plotting demo:
 
 FastSpec is developed by [Oleg Kochukhov](https://www.astro.uu.se/~oleg) (Department of Physics and Astronomy, Uppsala University, Sweden).
 
-If you use FastSpec in your research, please cite [Kochukhov (2026)](https://arxiv.org/abs/2610.31763).
+If you use FastSpec in your research, please cite [Kochukhov (2026, A&A, 715, A137)](https://doi.org/10.1051/0004-6361/202662504).
 
 FastSpec incorporates, in modified form, several external packages, whose authors are gratefully acknowledged:
 

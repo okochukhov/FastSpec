@@ -28,8 +28,8 @@ MODULE Voigt
   PRIVATE :: NVv, NVa, TabKind, VgtVmax, VgtAmax, SqrtPiInv, VgtPi, &
              VgtTab, VgtANode, VgtAIDa, VgtIDv, VgtIDt, VgtA1, VgtIA1, VgtReady
 
-  ! Per-line cache: a-dependent lookup state precomputed once per spectral
-  ! line by VoigtLineInit, used by HVoigtLine
+  ! Cache of the a-dependent lookup state, precomputed by VoigtLineInit for one line at one
+  ! depth and shared by its Zeeman components; used by HVoigtLine
   TYPE :: VoigtLine
     REAL(8) :: A  = 0d0     ! damping parameter
     REAL(8) :: UA = 0d0     ! a-interpolation weight

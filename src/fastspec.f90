@@ -4,8 +4,7 @@
 !
 !   Developed by Oleg Kochukhov (Uppsala University), oleg.kochukhov@physics.uu.se
 !
-!   Users of this code should cite Kochukhov (2026, A&A, 707, A16) - the paper
-!   containing the initial description of this code
+!   Users of this code should cite Kochukhov (2026, A&A, 715, A137)
 !
 ! =============================================================================================
 !
@@ -19,7 +18,7 @@
 ! radiative transfer problem and produces full Stokes IQUV spectra.
 !
 ! Main components of the calculation:
-!  - chemical equilibrium and ionisation balance from the modifed SME EOS package, providing
+!  - chemical equilibrium and ionisation balance from the modified SME EOS package, providing
 !    number densities and partition functions of atoms, ions and molecules
 !  - continuum opacities, largely following the continuous opacity routines of the
 !    ATLAS/SYNTHE codes by R. L. Kurucz
@@ -32,86 +31,6 @@
 !    for plane-parallel and spherical model atmospheres
 !  - disk integration and convolution with rotational, radial-tangential macroturbulence
 !    and Gaussian profiles
-!
-! Required input data:
-!
-!  1. Input parameter file in keyword=value format with mandatory keywords
-!       WAVE      = Wstart, Wend, step, mode (0: constant wavelength, 1: constant velocity step)
-!       SAVE      = five flags: line strength list (0: off, 1: atomic and magnetic lists,
-!                   2: also single-species molecular lists), then 0/1 flags for line opacity,
-!                   continuum opacity, intensity spectra, flux
-!       LINES     = line list entries (one per line): species code and line list file name
-!       MODEL     = model atmosphere file name
-!     and optional keywords
-!       MUS       = number of mu angles, or an explicit list of mu values (recognised by a
-!                   decimal point; the list may be continued over several lines)
-!       DISKQUAD  = 0/1/2 disk-integration quadrature: 0 = equal-area annuli, 1 = Gauss-Legendre
-!                   (default), 2 = Gauss-Radau with a node at mu = 1; an explicit MUS list of
-!                   more than one value requires 0
-!       VMIC      = microturbulent velocity (km/s)
-!       CONVOL    = Vsini (km/s), Vmacro (km/s), Vgau (km/s or resolving power if > 1000)
-!       BFIELD    = magnetic field vector (G); three numbers for BFRAME 0 or 1, or
-!                   2*NMU+1 numbers for BFRAME 2
-!       BFRAME    = 0/1/2 magnetic field reference frame: 0 = stellar surface (Br, Bm, Bp);
-!                   1 = observer frame (|B|, inclination, azimuth); 2 = observer frame with
-!                   an individual (inclination, azimuth) pair per mu angle
-!       ABUNDANCE = individual element abundances overriding the model atmosphere values,
-!                   given as El:value entries separated by commas or spaces, with optional
-!                   single quotes; the block may be continued over several lines
-!       [M/H]     = metallicity; replaces abundances in model atmosphere by the scaled solar table
-!       OPACITY   = file with precomputed line opacity to add to the calculation
-!       LIMITRAM  = RAM limit (GB) for large arrays
-!       EPSOPAC   = line-to-continuum opacity threshold for including lines
-!       VWFUDGE   = scaling factor of Unsold van der Waals broadening
-!       H2BRD     = scaling factor (0 to 10) of H2 contribution to van der Waals broadening
-!       MOLBRD    = 0/1 flag: apply Stark and van der Waals broadening to molecules if these
-!                   broadening constants are provided in the input line list
-!       VWMOL     = van der Waals broadening constant for all molecular lines (logarithmic if
-!                   negative, linear if positive); a non-zero value applies it with or without MOLBRD
-!       BFKURUCZ  = 0/1 flag: MARCS or ATLAS hydrogen bound-free cross sections as part of
-!                   hydrogen line opacity calculation with the occupation probability formalism
-!       HPROF     = 0/1/2/3 Stark profiles of hydrogen lines: 0 = original HLINOP; 1 = corrected
-!                   HLINOP; 2 = Lemke (1997) tables where available, otherwise corrected HLINOP
-!                   (default); 3 = Stehle & Hutcheon (1999) tables, then Lemke, then corrected
-!                   HLINOP. Lyman alpha always uses the original HLINOP
-!       HYDROSTAT = 0/1 flag: re-solve the hydrostatic structure when the abundances differ from
-!                   those of the model atmosphere, keeping T(tau) at the standard wavelength
-!                   (plane-parallel column-mass models only)
-!
-!  2. Model atmosphere in .krz (Kurucz) format: Teff, logg, model type, standard
-!     wavelength, opacity flags, element abundances and the depth-dependent structure
-!     (column mass, temperature, electron and total number densities, mass density).
-!     Spherical models (e.g. from MARCS) are recognised by the header text
-!     'SPHERICAL, RADIUS= <value> cm' and carry a 6th column with the height above the
-!     reference radius.
-!
-!  3. Line lists in one of four formats:
-!      - mixed-species HDF5 atomic lists (VALD extractions converted to HDF5); a list containing
-!        only hydrogen lines is treated separately and must appear first
-!      - mixed-species magnetic HDF5 atomic lists; a list containing parameters necessary
-!        for calculation of Zeeman splitting patterns
-!      - single-molecule HDF5 lists (e.g. ExoMol data converted to HDF5) with the isotopic
-!        fraction derived from the species code
-!      - mixed atomic/molecular magnetic line lists (ASCII .z format) including Zeeman
-!        splitting patterns, enabling polarised radiative transfer
-!
-! Output data (unformatted binary stream files):
-!   fs_linst.bin  = line list with central line strengths: one block per line list with
-!                   species name, ion, central wavelength and central line depth
-!                   of every retained (above the EpsOpac threshold) line
-!   fs_lineop.bin = line opacity as a function of depth and wavelength
-!   fs_contop.bin = continuum opacity as a function of depth and wavelength
-!   fs_spec.bin   = intensity spectra at each mu angle (Stokes IQUV in the magnetic case)
-!   fs_flux.bin   = disk-integrated and convolved flux spectrum
-!
-! Usage: 
-!   1. calculate synthetic intensity or Stokes parameter synthetic spectra:
-!   fastspec <input_parameter_file>
-!
-!   2. post-processes a previously computed intensity spectrum file (fs_spec.bin), applying
-!   disk integration and convolution with the given parameters (the disk-integration
-!   quadrature is identified from the mu values stored in the file):
-!   fastspec <intensity_file> <Vsini> <Vmacro> <Vgau|R>
 !
 ! =============================================================================================
 
@@ -131,12 +50,13 @@ PROGRAM FastSpec
   IMPLICIT NONE
 
   INTEGER :: Nargs, ArgLen, ArgStat
-  INTEGER :: i, MolIon, NlinesLim, NlinesTot, NlinesUseTot, TallCount, CImode
-  REAL :: CPUtime(2), CPUtotal, CPUopac
+  INTEGER :: i, MolIon, NlinesLim, NlinesTot, NlinesUseTot, TallCount = -1, CImode
+  REAL(4) :: CPUtime(2), CPUtotal, CPUopac
   REAL(8) :: Isot
   CHARACTER(10) :: Stime
   CHARACTER(8) :: MolName
   CHARACTER(64) :: MolCode, AtmName
+  CHARACTER(16) :: ScaleStr
   CHARACTER(1024) :: Msg
   LOGICAL :: MagResident = .FALSE.
 
@@ -205,8 +125,9 @@ PROGRAM FastSpec
     ! report time spent on convolution/disk-integration
     IF (Verbose >= 1) WRITE(*,'(A)') 'Time spent: ' // Stime
 
-    ! save output flux file only
+    ! save output flux file only, with the default prefix
     OutFlags(5) = 1
+    OutputFiles(5) = TRIM(OutPrefix) // TRIM(OutputFiles(5))
     CALL WriteOut
   
     ! should not proceed any further
@@ -252,6 +173,9 @@ PROGRAM FastSpec
   END IF
   WRITE(*, '(A)') TRIM(Msg)
 
+  ! Report isotopic fractions changed with the ISOTOPE keyword
+  IF (Verbose >= 1) CALL ShowIsotFrac
+
   ! Initialization of wavelength grid and related arrays, list of species, solving EOS
   IF (Verbose >= 1) THEN
     IF (HydroActive()) THEN
@@ -277,14 +201,15 @@ PROGRAM FastSpec
   ! Line opacity output is undefined for the magnetic case (LineOpac holds only
   ! the non-magnetic contribution), so disable it with a note if requested.
   IF (Magnetic .AND. OutFlags(2) > 0) THEN
-    IF (Verbose >= 1) WRITE(*, '(A)') ' Note: line opacity is not saved in the magnetic case'
+    IF (Verbose >= 1) WRITE(*, '(A)') ' Line opacity is not saved in the magnetic case'
     OutFlags(2) = 0
   END IF
 
   ! Report wavelength range and number of wavelengths
   WRITE(*, '(A, F0.1, A, F0.1, A, I0, A, I0)') &
     ' Wstart: ', Wstart, ', Wend: ', Wend, ', Nwl: ', Nwl, ', Nlists: ', Nfiles
-  IF (Radius > 0d0) WRITE(*, '(A, ES9.3, A)') ' Spherical model geometry, reference radius: ', Radius, ' cm'
+  IF (Radius > 0d0 .AND. Verbose >= 1) WRITE(*, '(A, ES9.3, A)') &
+    ' Spherical model geometry, reference radius: ', Radius, ' cm'
 
   ! Optionally load line opacity from a previously computed file
   IF (LEN_TRIM(OpacFile) > 0) CALL ReadOpac
@@ -302,7 +227,7 @@ PROGRAM FastSpec
   CPUtotal = MDtime(CPUtime)
   Stime = Sec2time(CPUtotal)
 
-  ! Report time spent on radiative transfer
+  ! Report time spent on continuum opacity
   IF (Verbose >= 1) WRITE(*,'(A)') 'Time spent: ' // Stime  
   
   ! Line number counters
@@ -313,14 +238,13 @@ PROGRAM FastSpec
   CPUopac = 0.0
   
   ! Loop over line list files
-  IF (Verbose == 2) WRITE(*,*) 'Loop over line lists...'
   DO i = 1, Nfiles
 
     ! start timer
     CPUtotal = MDtime(CPUtime)
 
     ! warn once if a non-magnetic list is processed after a magnetic one
-    IF (MagResident .AND. LineListType(i) /= 2) THEN
+    IF (MagResident .AND. LineListType(i) /= 2 .AND. Verbose >= 1) THEN
       WRITE(*, '(A)') ' Warning: a non-magnetic line list follows a magnetic one; for lower ' // &
         'peak memory place magnetic line lists last in the input file.'
       MagResident = .FALSE.
@@ -338,9 +262,16 @@ PROGRAM FastSpec
       ELSE IF (LineListType(i) == -1) THEN
         AtmName = 'H1'
       END IF
-    
+
+      ! scale gf values by the factor given after '-' in the line list code
+      IF (GfScale(i) /= 1d0) THEN
+        Lines%gf = Lines%gf * REAL(GfScale(i),4)
+        WRITE(ScaleStr, '(F7.5)') GfScale(i)
+        AtmName = TRIM(AtmName) // ', gf factor: ' // TRIM(ScaleStr)
+      END IF
+
       ! echo reading part
-      WRITE(*, '(A, I0, A)', ADVANCE='NO') &
+      IF (Verbose >= 1) WRITE(*, '(A, I0, A)', ADVANCE='NO') &
         ' File: ' // TRIM(Path2File(LineListFiles(i))) // &
         ', ' // TRIM(AtmName) // ', Lines read: ', Nlines, ' :: '
 
@@ -351,18 +282,26 @@ PROGRAM FastSpec
       CALL ReadHDF(LineListFiles(i), .TRUE., MolName, MolIon, MolCode)
       Lines => LinesM
 
-      ! derive isotopic fraction for this molecule based on the code in input file or in line list
-      IF (LEN_TRIM(MolCodeStd(i)) > 2 .AND. MolCodeStd(i)(1:1) /= '-') THEN
+      ! derive isotopic fraction for this molecule from the code in input file
+      IF ((LEN_TRIM(MolCodeStd(i)) > 2 .OR. INDEX(MolCodeStd(i), '.') > 0) .AND. &
+          MolCodeStd(i)(1:1) /= '-') THEN
         Isot = GetIsot(MolCodeStd(i))
+
+        ! an explicit factor bypasses the isotopic fraction table: warn if ISOTOPE changed
+        ! the fractions of the isotopes of this molecule
+        IF (INDEX(MolCodeStd(i), '.') == 2) THEN
+          IF (IsotChanged(MolCode)) WRITE(*, '(A)') ' Warning: the explicit isotopic factor of ' // &
+            TRIM(Path2File(LineListFiles(i))) // ' is used; ISOTOPE changes do not apply to it.'
+        END IF
       ELSE
         Isot = GetIsot(MolCode)
       END IF
-      
+
       ! apply isotopic correction to all gf values in this line list
       Lines%gf = Lines%gf * REAL(Isot,4)
       
       ! echo reading part
-      WRITE(*, '(A, I2, A, F7.5, A, I0, A)', ADVANCE='NO') &
+      IF (Verbose >= 1) WRITE(*, '(A, I2, A, F7.5, A, I0, A)', ADVANCE='NO') &
         ' File: ' // TRIM(Path2File(LineListFiles(i))) // &
         ', Molecule: ' // TRIM(MolName), MolIon, &
         ', Isot. fract.: ', Isot, ', Lines read: ', Nlines, ' :: '
@@ -386,8 +325,15 @@ PROGRAM FastSpec
       END IF
       Lines => LinesZ
 
+      ! scale gf values by the factor given after '-' in the line list code
+      IF (GfScale(i) /= 1d0) THEN
+        Lines%gf = Lines%gf * REAL(GfScale(i),4)
+        WRITE(ScaleStr, '(F7.5)') GfScale(i)
+        AtmName = TRIM(AtmName) // ', gf factor: ' // TRIM(ScaleStr)
+      END IF
+
       ! echo reading part
-      WRITE(*, '(A, I0, A)', ADVANCE='NO') &
+      IF (Verbose >= 1) WRITE(*, '(A, I0, A)', ADVANCE='NO') &
         ' File: ' // TRIM(Path2File(LineListFiles(i))) // &
         ', ' // TRIM(AtmName) // ', Lines read: ', Nlines, ' :: '
 
@@ -428,7 +374,10 @@ PROGRAM FastSpec
     Stime = Sec2time(CPUtotal)
 
     ! report time spent on opacity calculations
-    WRITE(*,'(A, I0, A)') 'Lines used: ', NlinesUse, ', Time spent: ' // Stime
+    IF (Verbose >= 1) THEN
+      CALL ProgressClear
+      WRITE(*,'(A, I0, A)') 'Lines used: ', NlinesUse, ', Time spent: ' // Stime
+    END IF
     
     ! clean allocated line arrays; deassociate the pointer
     IF (ALLOCATED(LinesM)) DEALLOCATE(LinesM)
@@ -442,8 +391,8 @@ PROGRAM FastSpec
 
   ! Report total number of lines from all files and total line spent
   Stime = Sec2time(CPUopac)
-  WRITE(*,'(A, I0, A, I0, A)') ' Total lines read: ', NlinesTot, ', Total lines used: ', &
-    NlinesUseTot, ', Time spent: ' // Stime
+  IF (Verbose >= 1) WRITE(*,'(A, I0, A, I0, A)') ' Total lines read: ', &
+    NlinesTot, ', Total lines used: ', NlinesUseTot, ', Time spent: ' // Stime
 
   ! If set of mu angles is available, perform radiative transfer
   IF (Nmu > 0) THEN
@@ -515,7 +464,7 @@ PROGRAM FastSpec
   CPUtotal = MDtime(CPUtime, TallCount)
   Stime = Sec2time(CPUtotal)
 
-  ! Report time spent on radiative transfer
+  ! Report time spent on full calculation
   IF (Verbose >= 1) WRITE(*,'(A)') ' Total time spent: ' // Stime
     
 END PROGRAM FastSpec

@@ -3,12 +3,11 @@
 ! This file is part of FastSpec, a fast stellar spectrum synthesis code developed by
 ! Oleg Kochukhov (Uppsala University), oleg.kochukhov@physics.uu.se
 !
-! opacity.f90: line and continuum opacity calculations - the line opacity kernel with
-! per-depth and per-line precomputation, accumulation of single- and multi-line opacity
-! on the wavelength grid, Zeeman-split magnetic line opacity including anomalous
-! dispersion terms, continuum opacity on the wavelength grid, hydrogen line opacity,
-! and support routines for adaptive line windowing and RAM-limited processing of large
-! line lists.
+! opacity.f90: line opacity calculations - the line opacity kernel with per-depth and
+! per-line precomputation, accumulation of single- and multi-line opacity on the
+! wavelength grid, Zeeman-split magnetic line opacity including anomalous dispersion
+! terms, and support routines for adaptive line windowing and RAM-limited processing
+! of large line lists.
 !
 ! =============================================================================================
 
@@ -164,8 +163,7 @@ MODULE Opacity
     ELSE
 
       ! vacuum wavelength to calculate the upper energy level
-      Wavevac = WaveL
-      IF (.NOT. Wvac) Wavevac = Air2Vac(Wavevac)
+      Wavevac = Air2Vac(WaveL)
 
       ! upper energy level and auxilliary parameters to calculate broadening
       Eup = Elo + 1d0 / (Wavevac * ev2Ang)
@@ -596,13 +594,16 @@ MODULE Opacity
   INTEGER FUNCTION WaveIdx(Wavein)
 
     REAL(8), INTENT(IN) :: Wavein
+    REAL(8) :: X
 
+    ! Clamp before conversion to INTEGER
     IF (Wmode == 0) THEN
-      WaveIdx = INT(Wavein / Dstep) + 1
-    ELSE IF (Wmode == 1) THEN
-      WaveIdx = INT(1d0 + LOG((Wavein / Wstart) + 1d0) / Rstep)
+      X = MIN(MAX(Wavein / Dstep, 0d0), DBLE(Nwl - 2))
+      WaveIdx = INT(X) + 1
+    ELSE
+      X = 1d0 + LOG(MAX((Wavein / Wstart) + 1d0, TINY(1d0))) / Rstep
+      WaveIdx = INT(MIN(MAX(X, 1d0), DBLE(Nwl - 1)))
     END IF
-    WaveIdx = MIN(MAX(WaveIdx, 1), Nwl - 1)
 
   END FUNCTION WaveIdx
 

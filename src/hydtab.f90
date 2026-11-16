@@ -14,8 +14,9 @@
 !                from Lemke (1997) if covered by valid nodes; area normalised to unity
 !   HtConvolve   convolution of a symmetric tabulated profile with a tabulated kernel (direct
 !                quadrature on the merged grid of both functions)
+!   HtSpline     second derivatives of a cubic spline (kernel in HtConvolve, profile store in HydrOpac)
 !
-! Tables (see tools/make_hydtab.py):
+! Tables:
 !   Stehle & Hutcheon 1999, A&AS 140, 93; CDS VI/98A: Lyman 2-30, Balmer 3-30, Paschen 4-30;
 !     with the same method and format, Brackett 5-7 from Stehle & Fouquet (2010, stark-h.obspm.fr);
 !     10 temperatures 2500 - 1.26e6 K, Ne 1e10 - 3.2e19 cm^-3 in 0.5 dex steps (fewer for high
@@ -28,7 +29,7 @@
 !     such nodes form a low-T, high-Ne corner and are replaced by the nearest valid temperature).
 !     Br11 and Br12 are not used (see HtTabInit).
 !
-! Interpolation (chosen by leave-one-out tests, tools/validate_tables.py): at fixed reduced
+! Interpolation (chosen by leave-one-out tests): at fixed reduced
 ! detuning (Delta omega / F0 or Delta alpha, with the local F0 = 1.25e-9 Ne^(2/3)), bilinear in
 ! (log T, log Ne) on log S; within a node PCHIP in (log Delta alpha, log S); beyond the last
 ! tabulated point S ~ x^(-5/2) (Stehle: tabulated wings factor; Lemke: continuation).
@@ -43,7 +44,7 @@ MODULE HydTab
   IMPLICIT NONE
 
   PRIVATE
-  PUBLIC :: HtTabInit, HtStarkTab, HtConvolve, HtSint
+  PUBLIC :: HtTabInit, HtStarkTab, HtConvolve, HtSpline
 
   REAL(8), PARAMETER :: Pi = 3.14159265358979323846D0
   REAL(8), PARAMETER :: ClA = 2.9979D18           ! speed of light in A/s as in Stehle's read_gen.f
@@ -450,43 +451,49 @@ CONTAINS
     AreaGeo = a + ktail*u(n)**(-1.5D0)/1.5D0
   END FUNCTION AreaGeo
 
-  ! Symmetric profile on a geometric grid at |y|: linear below U(1), log-log between grid points
-  ! (O(1) index), Ktail |y|^-5/2 beyond U(N)
-  REAL(8) FUNCTION HtSint(n, u, s0, s, ktail, lr, y)
-    INTEGER, INTENT(IN) :: n
-    REAL(8), INTENT(IN) :: u(n), s0, s(n), ktail, lr, y
-    REAL(8) :: ay, f
-    INTEGER :: j
-    ay = ABS(y)
-    IF (ay <= u(1)) THEN
-      HtSint = s0 + (s(1) - s0)*ay/u(1)
-    ELSE IF (ay >= u(n)) THEN
-      HtSint = ktail*ay**(-2.5D0)
-    ELSE
-      f = LOG(ay/u(1))/lr
-      j = MIN(INT(f) + 1, n - 1)
-      f = f - DBLE(j - 1)
-      IF (s(j) > 0.D0 .AND. s(j+1) > 0.D0) THEN
-        HtSint = s(j)*(s(j+1)/s(j))**f
-      ELSE
-        HtSint = s(j) + (s(j+1) - s(j))*f
-      END IF
-    END IF
-  END FUNCTION HtSint
-
   ! =============================================================================================
   ! Convolution phi = S (x) V of a symmetric profile S (geometric grid U(1:Ns), ratio EXP(Lr),
   ! S0 at 0, Ktail |y|^-5/2 beyond U(Ns)) with a kernel V tabulated on the ascending signed grid
   ! Z(1:Nk) (V = Btail/z^2 beyond the grid).  Output at 0 and at +-Uo(1:No) (minus side only if
   ! .NOT. Sym).  Direct trapezoidal quadrature on the merged grid {+-U, 0} U {u0 - Z}: S is exact
   ! on its grid and V on its grid; each is interpolated at the other's points (S: log-log;
-  ! V: linear inside the uniform core |z| <= Zcore, log-linear in the geometric wings).
-  SUBROUTINE HtConvolve(Ns, U, Lr, S0, S, Ktail, Nk, Z, V, Zcore, Btail, No, Uo, Sym, Phi0, PhiP, PhiM)
+  ! V: cubic spline over the whole kernel grid).
+  ! The logarithms of S and the spline of V are tabulated once per call, so that a quadrature
+  ! point costs at most one EXP (Sint) and no LOG or power.
+  SUBROUTINE HtConvolve(Ns, U, Lr, S0, S, Ktail, Nk, Z, V, Btail, No, Uo, Sym, Phi0, PhiP, PhiM)
     INTEGER, INTENT(IN) :: Ns, Nk, No
-    REAL(8), INTENT(IN) :: U(Ns), Lr, S0, S(Ns), Ktail, Z(Nk), V(Nk), Zcore, Btail, Uo(No)
+    REAL(8), INTENT(IN) :: U(Ns), Lr, S0, S(Ns), Ktail, Z(Nk), V(Nk), Btail, Uo(No)
     LOGICAL, INTENT(IN) :: Sym
     REAL(8), INTENT(OUT) :: Phi0, PhiP(No), PhiM(No)
+    REAL(8) :: Ls(Ns), Ps(Ns), Iu(Ns), Mv(Nk), H6(Nk), Idz(Nk), Ilr
+    LOGICAL :: Oks(Ns)
     INTEGER :: j
+
+    ! ln S and its log-log slope on each interval of the S grid; an interval with a non-positive
+    ! end point is interpolated linearly instead (Oks false)
+    Ilr = 1.D0/Lr
+    DO j = 1, Ns
+      Iu(j) = 1.D0/U(j)
+      Ls(j) = 0.D0
+      IF (S(j) > 0.D0) Ls(j) = LOG(S(j))
+    END DO
+    Oks = .FALSE.
+    Ps = 0.D0
+    DO j = 1, Ns - 1
+      Oks(j) = (S(j) > 0.D0 .AND. S(j+1) > 0.D0)
+      IF (Oks(j)) Ps(j) = (Ls(j+1) - Ls(j))*Ilr
+    END DO
+
+    ! Cubic spline of V over the kernel grid: second derivatives (at the ends those of the
+    ! V ~ 1/z^2 wing), inverse width and width^2/6 of each interval
+    CALL HtSpline(Nk, Z, V, 6.D0*V(1)/(Z(1)*Z(1)), 6.D0*V(Nk)/(Z(Nk)*Z(Nk)), Mv)
+    Idz = 0.D0
+    H6 = 0.D0
+    DO j = 1, Nk - 1
+      Idz(j) = 1.D0/(Z(j+1) - Z(j))
+      H6(j) = (Z(j+1) - Z(j))**2/6.D0
+    END DO
+
     Phi0 = Conv1(0.D0)
     DO j = 1, No
       PhiP(j) = Conv1(Uo(j))
@@ -502,7 +509,7 @@ CONTAINS
     ! value of the convolution at u0
     REAL(8) FUNCTION Conv1(u0)
       REAL(8), INTENT(IN) :: u0
-      INTEGER :: ia, ib, na, kp
+      INTEGER :: ia, ib, na, kp, js
       REAL(8) :: y, yp, f, fp, sum, ya, yb
       LOGICAL :: first
       ! A points: -U(Ns..1), 0, U(1..Ns) (index ia = 1..2Ns+1); B points: u0 - Z(Nk..1)
@@ -510,6 +517,7 @@ CONTAINS
       ia = 1
       ib = Nk
       kp = Nk                                   ! kernel bracket pointer (moves downwards)
+      js = MAX(Ns - 1, 1)                       ! S bracket pointer (moves down to 1, then up)
       sum = 0.D0
       first = .TRUE.
       yp = 0.D0
@@ -525,7 +533,7 @@ CONTAINS
           ia = ia + 1
         ELSE
           y = yb
-          f = HtSint(Ns, U, S0, S, Ktail, Lr, y)*V(ib)
+          f = Sint(y, js)*V(ib)
           ib = ib - 1
         END IF
         IF (.NOT. first) sum = sum + 0.5D0*(f + fp)*(y - yp)
@@ -558,11 +566,50 @@ CONTAINS
       END IF
     END FUNCTION As
 
-    ! kernel at z (decreasing along the A sweep): pointer kp kept such that Z(kp) <= z < Z(kp+1)
+    ! profile S at |yy| (linear below U(1), log-log between grid points, Ktail |y|^-5/2 beyond
+    ! U(Ns)) with the tabulated logarithms; |yy| first decreases and then increases along the
+    ! sweep: pointer jpp kept such that U(jpp) <= |yy| < U(jpp+1)
+    REAL(8) FUNCTION Sint(yy, jpp)
+      REAL(8), INTENT(IN) :: yy
+      INTEGER, INTENT(INOUT) :: jpp
+      REAL(8) :: ay, t, w, w2, la
+      ay = ABS(yy)
+      IF (ay <= U(1)) THEN
+        Sint = S0 + (S(1) - S0)*ay/U(1)
+      ELSE IF (ay >= U(Ns)) THEN
+        Sint = Ktail/(ay*ay*SQRT(ay))
+      ELSE
+        DO WHILE (jpp > 1 .AND. U(jpp) > ay)
+          jpp = jpp - 1
+        END DO
+        DO WHILE (jpp < Ns - 1 .AND. U(jpp+1) <= ay)
+          jpp = jpp + 1
+        END DO
+
+        ! la = ln(ay/U(jpp)) = ln(1 + t) = 2 atanh(t/(2 + t)); for the grid ratios in use (10^0.03)
+        ! t < 0.072 and the series is exact to rounding (next term < 1e-15 relative for t <= 0.08)
+        t = (ay - U(jpp))*Iu(jpp)
+        IF (t <= 0.08D0) THEN
+          w = t/(2.D0 + t)
+          w2 = w*w
+          la = 2.D0*w*(1.D0 + w2*(1.D0/3.D0 + w2*(0.2D0 + w2*(1.D0/7.D0 + w2/9.D0))))
+        ELSE
+          la = LOG(1.D0 + t)
+        END IF
+        IF (Oks(jpp)) THEN
+          Sint = EXP(Ls(jpp) + Ps(jpp)*la)
+        ELSE
+          Sint = S(jpp) + (S(jpp+1) - S(jpp))*la*Ilr
+        END IF
+      END IF
+    END FUNCTION Sint
+
+    ! kernel at z (decreasing along the A sweep) from its cubic spline: pointer kp kept such that
+    ! Z(kp) <= z < Z(kp+1)
     REAL(8) FUNCTION Vint(zz, kpp)
       REAL(8), INTENT(IN) :: zz
       INTEGER, INTENT(INOUT) :: kpp
-      REAL(8) :: t
+      REAL(8) :: t, a
       IF (zz <= Z(1) .OR. zz >= Z(Nk)) THEN
         Vint = Btail/(zz*zz)
         RETURN
@@ -574,14 +621,43 @@ CONTAINS
       DO WHILE (kpp < Nk - 1 .AND. Z(kpp+1) <= zz)
         kpp = kpp + 1
       END DO
-      t = (zz - Z(kpp))/(Z(kpp+1) - Z(kpp))
-      IF (ABS(zz) <= Zcore .OR. V(kpp) <= 0.D0 .OR. V(kpp+1) <= 0.D0) THEN
-        Vint = V(kpp) + (V(kpp+1) - V(kpp))*t
-      ELSE
-        Vint = V(kpp)*(V(kpp+1)/V(kpp))**t
-      END IF
+      t = (zz - Z(kpp))*Idz(kpp)
+      a = 1.D0 - t
+      Vint = MAX(a*V(kpp) + t*V(kpp+1) + (a*(a*a - 1.D0)*Mv(kpp) + t*(t*t - 1.D0)*Mv(kpp+1))*H6(kpp), 0.D0)
     END FUNCTION Vint
 
   END SUBROUTINE HtConvolve
+
+  ! =============================================================================================
+  ! Second derivatives M(1:n) of the cubic spline through (x, y), x ascending, for given end
+  ! values M(1) = M1 and M(n) = Mn (both zero: natural spline).  On the interval x(k)..x(k+1) of
+  ! width h, with t = (x - x(k))/h and a = 1 - t:
+  !   y = a y(k) + t y(k+1) + (a (a^2 - 1) M(k) + t (t^2 - 1) M(k+1)) h^2/6
+  SUBROUTINE HtSpline(n, x, y, M1, Mn, M)
+    INTEGER, INTENT(IN) :: n
+    REAL(8), INTENT(IN) :: x(n), y(n), M1, Mn
+    REAL(8), INTENT(OUT) :: M(n)
+    REAL(8) :: c(n), hl, hr, b, r
+    INTEGER :: k
+    M(1) = M1
+    M(n) = Mn
+    IF (n < 3) RETURN
+
+    ! tridiagonal system hl M(k-1) + 2 (hl + hr) M(k) + hr M(k+1) = r for k = 2..n-1: forward
+    ! elimination (c: reduced upper diagonal, M: reduced right-hand side), then back substitution
+    c(1) = 0.D0
+    DO k = 2, n - 1
+      hl = x(k) - x(k-1)
+      hr = x(k+1) - x(k)
+      r = 6.D0*((y(k+1) - y(k))/hr - (y(k) - y(k-1))/hl)
+      IF (k == n - 1) r = r - hr*Mn
+      b = 2.D0*(hl + hr) - hl*c(k-1)
+      c(k) = hr/b
+      M(k) = (r - hl*M(k-1))/b
+    END DO
+    DO k = n - 2, 2, -1
+      M(k) = M(k) - c(k)*M(k+1)
+    END DO
+  END SUBROUTINE HtSpline
 
 END MODULE HydTab

@@ -24,12 +24,18 @@ vald2hdf.py -- convert a VALD3 extraction into the FastSpec atomic-line HDF5 fil
     a factor that cannot be computed keeps 99.0, and electric-dipole-forbidden 
     lines get 99.0 for both.  This mode requires a VALD long-format extraction 
     and sets FORMAT_VERSION to 'z-1.0'.
+  * When the VALD footnote states that the oscillator strengths were NOT
+    scaled by the solar isotopic ratios, the isotope of each line is taken
+    from the label at the end of its reference string (e.g. '(151)Eu+'; 0
+    when absent).  If at least one written line carries an isotope, the
+    output gets an extra ISOT column with this mass number.
 
 Output layout (columnar / struct-of-arrays):
     group /Lines : one 1-D dataset per column {EL:str, ION:i16, W:f8, E:f4,
                    LGGF:f4, GRAD:f4, GQST:f4, GVDW:f4}, all sorted in
                    wavelength.  With --zeeman four more columns follow
-                   {JLO:f4, JUP:f4, GLO:f4, GUP:f4}.  Payload columns are
+                   {JLO:f4, JUP:f4, GLO:f4, GUP:f4}, and for unscaled
+                   isotopic lines the last column is ISOT:i16.  Payload columns are
                    chunked + shuffled + gzip-compressed; W is left contiguous
                    (uncompressed) so the reader's full-column bound scan is a
                    fast straight read.  Each column dataset carries a UNIT
@@ -408,6 +414,10 @@ _ZEEMAN_COLUMNS = (4, 6, 7, 8)   # jlo, jup, lande_lo, lande_up
 _ENERGY_UNIT_RE = re.compile(r'(?:E[_ ]?low|Excit)\s*\(([^)]*)\)',
                              re.IGNORECASE)
 
+# Isotope label closing a VALD reference string, e.g. "(64)Ni'" or "(151)Eu+'":
+# mass number and element symbol.
+_ISOTOPE_RE = re.compile(r"\((\d+)\)([A-Z][a-z]?)\+*'?\s*$")
+
 
 def detect_format(infile, lines):
     """Identify the VALD output flavour.
@@ -513,6 +523,17 @@ def detect_vacuum(header_lines):
     return False
 
 
+def detect_isotope_scaling(trailer_lines):
+    """False if the VALD footnote after the line data says the oscillator
+    strengths were NOT scaled by the solar isotopic ratios; True otherwise
+    (scaled, or no footnote)."""
+    for line in trailer_lines:
+        low = line.lower()
+        if 'oscillator strengths were' in low and 'isotopic' in low:
+            return 'not scaled' not in low
+    return True
+
+
 # =============================================================================
 #  VALD parsing
 # =============================================================================
@@ -530,6 +551,8 @@ class Stats:
         self.computed_jk = 0    # ... JK coupling
         self.n_forbidden = 0    # E1-forbidden lines (glo = gup = 99)
         self.n_failed = 0       # atomic lines with no computable Lande factor
+        self.gf_isoscaled = True  # log gf scaled by the solar isotopic ratios
+        self.n_isot = 0         # written lines with an isotope (ISOT column)
 
 
 def classify_lande(jlo, jup, lande_lo, lande_up, cfg_lo, cfg_up):
@@ -574,14 +597,17 @@ def classify_lande(jlo, jup, lande_lo, lande_up, cfg_lo, cfg_up):
 
 
 def read_vald(infile, hlist=False, zeeman=False):
-    """Read any VALD extraction; return (records, stats, wl_vac).
+    """Read any VALD extraction; return (records, stats, wl_vac, isot).
 
     ``records`` is a list of (el, ion, w, e, lggf, grad, gqst, gvdw) tuples
     in file order, restricted to atomic species with ion <= MAXION;
     hydrogen is kept only when ``hlist`` is set.  With ``zeeman`` each tuple
     is extended by (jlo, jup, glo, gup) -- the lower/upper level J values and
     Lande factors (see classify_lande) -- and the Lande statistics in
-    ``stats`` are filled in; this requires the long format.
+    ``stats`` are filled in; this requires the long format.  ``isot`` holds
+    the isotope mass number of each record from its reference string (0 when
+    absent), and ``stats.gf_isoscaled`` whether VALD scaled log gf by the
+    solar isotopic ratios.
     """
     lines = read_vald_lines(infile)
     kind, layout, header_offset, nlin = detect_format(infile, lines)
@@ -606,7 +632,10 @@ def read_vald(infile, hlist=False, zeeman=False):
 
     stats = Stats()
     stats.processed = nlin
+    stats.gf_isoscaled = detect_isotope_scaling(
+        lines[header_offset + group * nlin:])
     records = []
+    isot = []
     molecules = set()
 
     for k in range(nlin):
@@ -650,6 +679,12 @@ def read_vald(infile, hlist=False, zeeman=False):
 
         if energy_in_cm:
             e /= CM_PER_EV
+
+        # Isotope label at the end of the reference string (data line in the
+        # short format, fourth line of the group in the long format)
+        m = _ISOTOPE_RE.search(lines[base + 3] if layout == 'long' else data)
+        isot.append(int(m.group(1)) if m and m.group(2) == el else 0)
+
         if zeeman:
             glo, gup, category, schemes_used = classify_lande(
                 jlo, jup, lande_lo, lande_up,
@@ -695,7 +730,7 @@ def read_vald(infile, hlist=False, zeeman=False):
         print('{} lines with no computable Lande factor retained as '
               'non-magnetic'.format(stats.n_failed), file=sys.stderr)
 
-    return records, stats, wl_vac
+    return records, stats, wl_vac, isot
 
 
 # =============================================================================
@@ -740,15 +775,18 @@ def _write_column(group, name, data, unit, compress=True):
     _write_scalar_attr(d, 'UNIT', unit)
 
 
-def _lines_np_dtype(strsize, zeeman=False):
+def _lines_np_dtype(strsize, zeeman=False, isot=False):
     """Packed numpy dtype for the /Lines columns.  The atomic list has eight
-    columns; the --zeeman list appends JLO, JUP, GLO, GUP (all f4)."""
+    columns; the --zeeman list appends JLO, JUP, GLO, GUP (all f4), and
+    ``isot`` the isotope mass number ISOT (i16)."""
     fields = [('EL', 'S{}'.format(strsize)), ('ION', '<i2'),
               ('W', '<f8'), ('E', '<f4'), ('LGGF', '<f4'),
               ('GRAD', '<f4'), ('GQST', '<f4'), ('GVDW', '<f4')]
     if zeeman:
         fields += [('JLO', '<f4'), ('JUP', '<f4'),
                    ('GLO', '<f4'), ('GUP', '<f4')]
+    if isot:
+        fields += [('ISOT', '<i2')]
     return np.dtype(fields)
 
 
@@ -769,6 +807,8 @@ COLUMN_UNITS = {
     'JUP':  'J of the upper level (dimensionless)',
     'GLO':  'Lande factor of the lower level (99.0 = unknown or forbidden)',
     'GUP':  'Lande factor of the upper level (99.0 = unknown or forbidden)',
+    'ISOT': 'isotope mass number (0 = not given); LGGF not scaled by the '
+            'isotopic fraction',
 }
 
 
@@ -828,14 +868,19 @@ def convert(infile, outfile=None, wmin=None, wmax=None, hlist=False,
           .format(infile, outfile, 'Zeeman' if zeeman else 'atomic'),
           file=sys.stderr)
 
-    records, stats, wl_vac = read_vald(infile, hlist=hlist, zeeman=zeeman)
+    records, stats, wl_vac, isot = read_vald(infile, hlist=hlist,
+                                             zeeman=zeeman)
     if not records:
         raise VALDFormatError(
             '{}: no atomic lines retained; nothing to write.'.format(infile))
 
+    # Isotope column for log gf values not scaled by the solar isotopic
+    # ratios; dropped below if no written line carries an isotope
+    add_isot = not stats.gf_isoscaled
     strsize = max(len(r[0]) for r in records) + 1
-    arr = np.array([(r[0].encode('ascii'),) + r[1:] for r in records],
-                   dtype=_lines_np_dtype(strsize, zeeman=zeeman))
+    arr = np.array([(r[0].encode('ascii'),) + r[1:] + ((iso,) if add_isot else ())
+                    for r, iso in zip(records, isot)],
+                   dtype=_lines_np_dtype(strsize, zeeman=zeeman, isot=add_isot))
 
     # Sort in wavelength (stable: lines of equal wavelength keep file order).
     arr = arr[np.argsort(arr['W'], kind='stable')]
@@ -853,6 +898,15 @@ def convert(infile, outfile=None, wmin=None, wmax=None, hlist=False,
                   file=sys.stderr)
             print('Final number of lines {}'.format(nkeep), file=sys.stderr)
             arr = arr[keep]
+
+    if add_isot:
+        stats.n_isot = int(np.count_nonzero(arr['ISOT']))
+        if stats.n_isot > 0:
+            print('log gf not scaled by the solar isotopic ratios: added ISOT '
+                  'column ({} lines with an isotope)'.format(stats.n_isot),
+                  file=sys.stderr)
+        else:
+            arr = arr[[n for n in arr.dtype.names if n != 'ISOT']]
 
     write_hdf(outfile, arr, strsize, wl_vac, hlist, base, provenance,
               zeeman=zeeman)

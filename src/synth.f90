@@ -29,20 +29,20 @@ CONTAINS
     USE IOUtils
     USE Utils
     USE Voigt, ONLY: VoigtInit
-    USE FaradayVoigt, ONLY: FVoigtInit
     USE Opacity, ONLY: XlineInit
     USE Solver, ONLY: SphereInit
 
     IMPLICIT NONE
 
-    INTEGER :: i, iion, ispc, Natom, Nlist, Ierr, IonMol, NaddSpc = 58
+    INTEGER :: i, iion, ispc, itau, Natom, Nlist, Ierr, IonMol, NaddSpc = 59
     REAL(8), ALLOCATABLE :: Pgas(:)
     CHARACTER(2), PARAMETER :: HotEl(8) = (/ 'C ', 'N ', 'O ', 'Ne', 'Mg', 'Si', 'S ', 'Fe' /)
     INTEGER, PARAMETER :: HotIonlo(8) = (/ 1, 1, 1, 1, 2, 2, 2, 2 /)
     INTEGER, PARAMETER :: HotIonhi(8) = (/ 6, 6, 6, 6, 6, 6, 6, 5 /)
     INTEGER, EXTERNAL :: EqList
-    REAL, DIMENSION(SIZE(Abund)) :: AbundL, AmassL
-    LOGICAL :: IsMag
+    REAL(4) :: AmassL(SIZE(Amass))
+    REAL(4), ALLOCATABLE :: AbundL(:,:)
+    LOGICAL :: IsMag, IsMol
     REAL(8) :: EpsWl = 1d-12
     CHARACTER(8) :: Splist(Maxspl), ElMol
     CHARACTER(64) :: MolCode 
@@ -90,23 +90,13 @@ CONTAINS
     ! Line opacity will be accumulated over line lists, so it needs to be initialized once
     LineOpac = 0d0
   
-    ! Convert abundances from log to fractions
-    DO i = 1, SIZE(Abund)
-      IF (Abund(i) < 0 .AND. Abund(i) >= -30.) THEN
-        Abund(i) = 10d0**Abund(i)
-      ELSE IF (Abund(i) < -30.) THEN
-        Abund(i) = 1d-30
-      END IF
-    END DO
+    ! Convert abundances of all layers from log to fractions
+    WHERE (Abund < 0 .AND. Abund >= -30.) Abund = 10d0**Abund
+    WHERE (Abund < -30.) Abund = 1d-30
 
     ! Same conversion for the model atmosphere abundances used by the hydrostatic remap
-    DO i = 1, SIZE(AbundModel)
-      IF (AbundModel(i) < 0 .AND. AbundModel(i) >= -30.) THEN
-        AbundModel(i) = 10d0**AbundModel(i)
-      ELSE IF (AbundModel(i) < -30.) THEN
-        AbundModel(i) = 1d-30
-      END IF
-    END DO
+    WHERE (AbundModel < 0 .AND. AbundModel >= -30.) AbundModel = 10d0**AbundModel
+    WHERE (AbundModel < -30.) AbundModel = 1d-30
 
     ! Reclassify Type=0 line lists that are actually ASCII magnetic (.z) files
     DO i = 1, Nfiles
@@ -135,7 +125,12 @@ CONTAINS
         IF (LineListType(i) == 2) THEN
           CALL ReadAscMag(LineListFiles(i), Natom, ElAtom, IonAtom, LinSpcL)
         ELSE
-          CALL ReadHDF(LineListFiles(i), .FALSE., ElMol, IonMol, MolCode, Natom, ElAtom, IonAtom, LinSpcL, Mag=IsMag)
+          CALL ReadHDF(LineListFiles(i), .FALSE., ElMol, IonMol, MolCode, &
+                       Natom, ElAtom, IonAtom, LinSpcL, Mag=IsMag, Mol=IsMol)
+
+          ! Molecular list given with '-' code
+          IF (IsMol) CALL ErrStop('Line list ' // TRIM(LineListFiles(i)) // &
+                                  ' is molecular: its code must not start with ''-''')
 
           ! change linelist type if this is hydrogen line list
           IF (Hflag == 1) THEN
@@ -143,6 +138,9 @@ CONTAINS
 
             ! quit if this line list does not appear first on the list
             IF (i /= 1) CALL ErrStop('Hydrogen line list must come first')
+
+            ! hydrogen line opacity does not use the gf values of the list
+            IF (GfScale(i) /= 1d0) CALL ErrStop('gf factor is not allowed for the hydrogen line list')
           END IF
 
           ! magnetic (Zeeman) HDF list: switch to the magnetic line-list type
@@ -168,8 +166,14 @@ CONTAINS
 
       ! single-species molecular line list
       ELSE IF (LineListType(i) == 1) THEN
+
+        ! Species code requires a molecular HDF5 list
+        IF (.NOT. IsHDF5(LineListFiles(i))) CALL ErrStop('Line list ' // TRIM(LineListFiles(i)) // &
+                                                         ' is not HDF5: its code must start with ''-''')
         Nspc(i) = 1
-        CALL ReadHDF(LineListFiles(i), .FALSE., ElMol, IonMol, MolCode)
+        CALL ReadHDF(LineListFiles(i), .FALSE., ElMol, IonMol, MolCode, Mol=IsMol)
+        IF (.NOT. IsMol) CALL ErrStop('Line list ' // TRIM(LineListFiles(i)) // &
+                                      ' is atomic: its code must start with ''-''')
         ElAll = [ElAll, ElMol]
         IonAll = [IonAll, IonMol]
         ispc = ispc + 1
@@ -226,6 +230,8 @@ CONTAINS
     Elemc(Nelem) = 'CH'; Ion(Nelem) = 1; Ix%CH = Nelem
     Nelem = Nelem + 1
     Elemc(Nelem) = 'OH'; Ion(Nelem) = 1; Ix%OH = Nelem
+    Nelem = Nelem + 1
+    Elemc(Nelem) = 'NH'; Ion(Nelem) = 1; Ix%NH = Nelem
 
     ! Add ionization stages of C, N, O, Ne, Mg, Si, S and Fe needed by HOTOP, reusing
     ! the continuum species already on the list and recording positions in Ix%Hot
@@ -253,7 +259,20 @@ CONTAINS
     Nlist = 0
     ALLOCATE(IdxSpc(Nelem))
     AbundL = REAL(Abund,4)                           ! neeed for compatibility with EOS
-    Ierr = EqList(AbundL, Elemen, Elemc, Ion, IdxSpc, Splist, Nelem, Nlist, Maxspl, SIZE(Elemen))
+
+    ! Check the abundances of every layer
+    DO itau = 1, Ntau
+      DO i = 1, SIZE(AbundL,1)
+        IF (AbundL(i,itau) < 0. .OR. AbundL(i,itau) > 1.) THEN
+          WRITE(Msg, '(A, I0, A, ES10.3)') 'Init: bad abundance of ' // TRIM(Elemen(i)) // &
+            ' in model layer ', itau, ': ', AbundL(i,itau)
+          CALL ErrStop(Msg)
+        END IF
+      END DO
+    END DO
+    
+    ! Call EqList for the first layer; the list of species does not depend on the abundances
+    Ierr = EqList(AbundL(:,1), Elemen, Elemc, Ion, IdxSpc, Splist, Nelem, Nlist, Maxspl, SIZE(Elemen))
     IF (Ierr /= 0) THEN
       WRITE(Msg, '(A, I0)') 'EqList: returned error #', Ierr
       CALL ErrStop(Msg)
@@ -298,7 +317,7 @@ CONTAINS
     USE Config, ONLY: Hydrostat
     USE AtmosData, ONLY: Abund, AbundModel
 
-    REAL(8), DIMENSION(SIZE(Abund)) :: A, Am
+    REAL(8), ALLOCATABLE :: A(:,:), Am(:,:)
 
     A = Abund
     Am = AbundModel
@@ -320,15 +339,19 @@ CONTAINS
     USE LineData
     USE Utils
 
-    REAL, INTENT(IN) :: AbundL(SIZE(Abund)), AmassL(SIZE(Abund))
+    REAL(4), INTENT(IN) :: AbundL(SIZE(Abund,1),Ntau), AmassL(SIZE(Abund,1))
     CHARACTER(8), INTENT(IN) :: Splist(Maxspl)
     INTEGER, INTENT(IN) :: Nlist
     REAL(8), INTENT(IN) :: Pgas(Ntau)
     LOGICAL, INTENT(IN) :: Warn
     INTEGER :: itau, itmin, Niter, EosMode
-    REAL :: Temp, Ptotal, Pelec, XnaL, XneL, RhoL
-    CHARACTER(1024) :: Msg
+    REAL(4) :: Temp, Ptotal, Pelec, XnaL, XneL, RhoL
     REAL(4), ALLOCATABLE :: PotIonC(:), XamassC(:)
+    LOGICAL :: FirstMsg
+    CHARACTER(1024) :: Msg
+
+    ! Messages start on a new line after the stage report that the caller left open
+    FirstMsg = .TRUE.
 
     ! Index of the coolest layer
     itmin = MINLOC(Atmos%T, 1)
@@ -340,21 +363,25 @@ CONTAINS
       ! run EOS in mode 10 which starts the iteration from the model Pe. For T > 12000 K
       ! mode 10 would keep the model Pe instead of re-solving it, so use mode 0 there
       EosMode = MERGE(10, 0, Temp <= 12000.)
-      CALL EqStat(EosMode, Temp, Ptotal, Pelec, AbundL, Elemen, AmassL, SIZE(Elemen), &
+      CALL EqStat(EosMode, Temp, Ptotal, Pelec, AbundL(:,itau), Elemen, AmassL, SIZE(Elemen), &
         IdxSpc, Splist, FractionPF(1,itau), PartFunc(1,itau), PotIon, Xamass, Nelem, Nlist, &
         XneL, XnaL, RhoL, Niter)
 
       ! EqStat gives up and returns after 20*MAXITER = 100000 iterations
       IF (Niter > 100000) THEN
+        IF (FirstMsg .AND. Verbose >= 1) WRITE(*,*)
         WRITE(Msg, '(A, I0, A, I0, A, F0.1, A, ES9.3, A)') 'EqStat: no convergence in layer ', &
           itau, ' of ', Ntau, ' (T=', Temp, ' K, Pgas=', Ptotal, ' dyn/cm^2)'
         CALL ErrStop(Msg)
       END IF
 
       ! issue warning if XNE changed by >10%
-      IF (Warn .AND. ABS(XneL-Atmos(itau)%Xne)/Atmos(itau)%Xne > 0.1) &
-        WRITE(*,'(I3,F0.1," XNE changed by EOS: ",ES12.5," %")') &
+      IF (Warn .AND. ABS(XneL-Atmos(itau)%Xne)/Atmos(itau)%Xne > 0.1) THEN
+        IF (FirstMsg .AND. Verbose >= 1) WRITE(*,*)
+        FirstMsg = .FALSE.
+        WRITE(*,'(I3,1X,F0.1," XNE changed by EOS: ",ES12.5," %")') &
         itau,Temp,(XneL-Atmos(itau)%Xne)/Atmos(itau)%Xne*100
+      END IF
 
       ! update Xna, Xne, Rho in the model atmosphere
       Atmos(itau)%Xna = REAL(XnaL,8)
@@ -382,7 +409,8 @@ CONTAINS
   ! atmosphere: each layer keeps its temperature and its continuum optical depth at the
   ! standard wavelength, the gas pressure follows the column mass as in the original model,
   ! and the column mass of every layer is found such that the optical depth computed with
-  ! the new abundances reproduces that of the model with its own abundances
+  ! the new abundances reproduces that of the model with its own abundances. Depth-dependent
+  ! abundances stay with their layers, i.e. with the optical depth of each layer
   SUBROUTINE HydroRemap(AbundL, AmassL, Splist, Nlist, Pgas)
 
     USE Config
@@ -390,12 +418,12 @@ CONTAINS
     USE Utils
     USE Contop, ONLY: Xcont
 
-    REAL, INTENT(IN) :: AbundL(SIZE(Abund)), AmassL(SIZE(Abund))
+    REAL(4), INTENT(IN) :: AbundL(SIZE(Abund,1),Ntau), AmassL(SIZE(Abund,1))
     CHARACTER(8), INTENT(IN) :: Splist(Maxspl)
     INTEGER, INTENT(IN) :: Nlist
     REAL(8), INTENT(IN) :: Pgas(Ntau)
     INTEGER :: k, iter, ihalf
-    REAL :: AbundML(SIZE(Abund))
+    REAL(4) :: AbundML(SIZE(Abund,1),Ntau)
     REAL(8) :: Dm, Sk, Jkk, Jkm
     REAL(8), DIMENSION(Ntau) :: Lgm0, LgPg0, Tau0, Xm, XmOld, Kap, KapOld, KapD, Beta, Res, Dx
     CHARACTER(1024) :: Msg
@@ -489,7 +517,7 @@ CONTAINS
     USE Utils, ONLY: UpperBoundReal8
     USE Contop, ONLY: Xcont
 
-    REAL, INTENT(IN) :: AbundL(SIZE(Abund)), AmassL(SIZE(Abund))
+    REAL(4), INTENT(IN) :: AbundL(SIZE(Abund,1),Ntau), AmassL(SIZE(Abund,1))
     CHARACTER(8), INTENT(IN) :: Splist(Maxspl)
     INTEGER, INTENT(IN) :: Nlist
     REAL(8), INTENT(IN) :: Lgm0(Ntau), LgPg0(Ntau), Xm(Ntau)
@@ -595,6 +623,7 @@ CONTAINS
     IxFe1  = IdxSpc(Ix%Fe1)
     IxCH   = IdxSpc(Ix%CH)
     IxOH   = IdxSpc(Ix%OH)
+    IxNH   = IdxSpc(Ix%NH)
 
     ! Indices of the HOTOP high-ion species
     IxHot = 0
@@ -616,20 +645,24 @@ CONTAINS
     USE Config
     USE AtmosData
     USE SpecData
+    USE Utils, ONLY: Air2Vac
 
     INTEGER :: iwl
     REAL(8) :: Copac(Ntau)
 
+    ! Continuum opacity at the standard wavelength with the full H bound-free opacity
+    IF (Motype == 1) THEN
+      CALL ContopSetup(.TRUE.)
+      CALL Xcont(Wlstd, ContOpacStd)
+    END IF
+
     ! Prepare the continuum opacity routines
     CALL ContopSetup(.FALSE.)
-
-    ! Continuum opacity at standard wavelength
-    IF (Motype == 1) CALL Xcont(Wlstd, ContOpacStd)
 
     ! Loop over wavelengths
     !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(iwl, Copac)
     DO iwl = 1, Nwl
-      CALL Xcont(Wave(iwl) + Wfirst, Copac)
+      CALL Xcont(Air2Vac(Wave(iwl) + Wfirst), Copac)
       IF (Motype == 1) Copac = Copac / ContOpacStd
       ContOpac(:, iwl) = Copac
     END DO
@@ -794,7 +827,7 @@ CONTAINS
     END IF
 
     ! Start of central line opacity calculation
-    WRITE(*, '(A)', ADVANCE='NO') 'Central line opacity :: '
+    IF (Verbose >= 1) CALL ProgressShow('Central line opacity :: ')
   
     ! Loop over spectral lines
     !$OMP PARALLEL DO SCHEDULE(GUIDED, 1000) DEFAULT(SHARED) &
@@ -901,7 +934,7 @@ CONTAINS
 
     ! No lines left after the rejection of weak lines
     IF (Nlines == 0) THEN
-      WRITE(*, '(A)', ADVANCE='NO') 'Total line opacity :: '
+      IF (Verbose >= 1) CALL ProgressShow('Total line opacity :: ')
       NlinesUse = 0
       DEALLOCATE(LinFlag, Wlcent, Ileft, Iright)
       DEALLOCATE(LinCop, LinVvgt, LinAvgt)
@@ -911,7 +944,10 @@ CONTAINS
 
     ! Identify wide lines
     CALL MarkWideLines(NlinesStep, Nwide)
-    IF (Nwide > 0) WRITE(*, '(A, I0, A)', ADVANCE='NO') 'Wide lines: ', Nwide, ' :: '
+    IF (Verbose >= 1) THEN
+      CALL ProgressClear
+      IF (Nwide > 0) WRITE(*, '(A, I0, A)', ADVANCE='NO') 'Wide lines: ', Nwide, ' :: '
+    END IF
 
     ! Initialize line index pointers
     Lstart = Nlines
@@ -964,8 +1000,8 @@ CONTAINS
       END DO
     END IF
 
-    ! Start of central line opacity calculation
-    WRITE(*, '(A)', ADVANCE='NO') 'Total line opacity :: '
+    ! Start of total line opacity calculation
+    IF (Verbose >= 1) CALL ProgressShow('Total line opacity :: ')
 
     ! Initial line and wavelength indices; the block preloaded by the windowing loop starts at line 1
     iline1 = 1
@@ -1140,7 +1176,7 @@ CONTAINS
     END IF
 
     ! Start of central line opacity calculation
-    WRITE(*, '(A)', ADVANCE='NO') 'Central line opacity :: '
+    IF (Verbose >= 1) CALL ProgressShow('Central line opacity :: ')
 
     ! Loop over spectral lines
     !$OMP PARALLEL DO SCHEDULE(GUIDED, 1000) DEFAULT(SHARED) &
@@ -1154,8 +1190,8 @@ CONTAINS
       IF (LinesZ(iline)%Gvdw > 10.0) LinFlag(iline) = IBSET(LinFlag(iline), 2)
 
       ! scale Zeeman splitting pattern by wavelength-depedent magnetic split
-      LinesZ(iline)%SplPi = LinesZ(iline)%SplPi * Bsplit * (Wlcent(iline) + Wfirst)**2
-      LinesZ(iline)%SplSi = LinesZ(iline)%SplSi * Bsplit * (Wlcent(iline) + Wfirst)**2
+      LinesZ(iline)%SplPi = REAL(LinesZ(iline)%SplPi * Bsplit * (Wlcent(iline) + Wfirst)**2, 4)
+      LinesZ(iline)%SplSi = REAL(LinesZ(iline)%SplSi * Bsplit * (Wlcent(iline) + Wfirst)**2, 4)
 
       ! maximum positive offset due to Zeeman-split
       SplMax = MAX(MAXVAL(ABS(LinesZ(iline)%SplSi)), MAXVAL(ABS(LinesZ(iline)%SplPi)))
@@ -1258,7 +1294,7 @@ CONTAINS
 
     ! No lines left after the rejection of weak lines
     IF (Nlines == 0) THEN
-      WRITE(*, '(A)', ADVANCE='NO') 'Total line opacity :: '
+      IF (Verbose >= 1) CALL ProgressShow('Total line opacity :: ')
       NlinesUse = 0
       DEALLOCATE(LinFlag, Wlcent, Ileft, Iright)
       DEALLOCATE(LinCop, LinVvgt, LinAvgt)
@@ -1268,8 +1304,11 @@ CONTAINS
 
     ! Identify wide lines
     CALL MarkWideLines(NlinesStep, Nwide)
-    IF (Nwide > 0) WRITE(*, '(A, I0, A)', ADVANCE='NO') 'Wide lines: ', Nwide, ' :: '
-
+    IF (Verbose >= 1) THEN
+      CALL ProgressClear
+      IF (Nwide > 0) WRITE(*, '(A, I0, A)', ADVANCE='NO') 'Wide lines: ', Nwide, ' :: '
+    END IF
+    
     ! Initialize line index pointers
     Lstart = Nlines
     Lstop = 1
@@ -1321,8 +1360,8 @@ CONTAINS
       END DO
     END IF
 
-    ! Start of central line opacity calculation
-    WRITE(*, '(A)', ADVANCE='NO') 'Total line opacity :: '
+    ! Start of total line opacity calculation
+    IF (Verbose >= 1) CALL ProgressShow('Total line opacity :: ')
 
     ! Initial line and wavelength indices; the block preloaded by the windowing loop starts at line 1
     iline1 = 1
@@ -1435,8 +1474,8 @@ CONTAINS
     REAL(8) :: dW, Wl, Wlprev, MaxOpac
     REAL(8), PARAMETER :: Clight = Vc * 1d13, Amassh = 1.00794D0
 
-    ! H1 and He1 number densities
-    H1Frct  = Fraction(IdxSpc(Ix%H1 ), :)
+    ! H1 number density divided by its partition function and He1 number density
+    H1Frct  = FractionPF(IdxSpc(Ix%H1 ), :)
     He1Frct = Fraction(IdxSpc(Ix%He1), :)
     
     ! Thermodynamic variables
@@ -1458,9 +1497,9 @@ CONTAINS
       NHlo = NINT(LinesA%Gqst)
       NHup = NINT(LinesA%Gvdw)
 
-      ! Verify that NHlo and NHup do not exceed NHlevels hardwired in hydropac.f90
-      IF (ANY(NHlo < 1) .OR. ANY(NHup > NHlevels)) &
-        CALL ErrStop('HLineopCalc: H line quantum number outside 1..NHlevels')
+      ! Verify 1 <= NHlo < NHup <= NHlevels (NHlevels hardwired in hydropac.f90)
+      IF (ANY(NHlo < 1) .OR. ANY(NHup > NHlevels) .OR. ANY(NHup <= NHlo)) &
+        CALL ErrStop('HLineopCalc: H line quantum numbers outside 1 <= n_lo < n_up <= NHlevels')
     END IF
 
     ! Initialise hydrogen level data and precompute all line-, depth- and 
@@ -1727,12 +1766,11 @@ CONTAINS
 
   END SUBROUTINE MaxHOpac
 
-  ! Central line strength: residual intensity 1 - I(line)/I(continuum) at the line center,
-  ! computed from the given central line and continuum absorption coefficient arrays. For a
-  ! single mu angle the emergent intensities at that angle are compared directly; for several
-  ! mu angles both intensities are disk-integrated using the flux weights Wmu of the
-  ! disk-integration quadrature (set by ReadInputFile). No Vsini, Vmacro or Gaussian broadening
-  ! is applied.
+  ! Central line depth: 1 - I(line)/I(continuum) at the line center, computed from the given central 
+  ! line and continuum absorption coefficient arrays. For a single mu angle the emergent intensities 
+  ! at that angle are used directly. For several mu angles both intensities are disk-integrated using 
+  ! the flux weights Wmu of the disk-integration quadrature (set by ReadInputFile). No Vsini, Vmacro 
+  ! or Gaussian broadening is applied.
   SUBROUTINE LinStrCalc(Wl, LineOpacL, ContOpacL, LinStrL)
 
     USE Solver, ONLY: LocPrfPP, LocPrfSph
@@ -1743,7 +1781,7 @@ CONTAINS
     REAL(8), INTENT(IN) :: Wl                    ! central wavelength [Ang]
     REAL(8), INTENT(IN) :: LineOpacL(Ntau)       ! line absorption coefficient at the line center
     REAL(8), INTENT(IN) :: ContOpacL(Ntau)       ! continuum absorption coefficient at the line center
-    REAL(4), INTENT(OUT) :: LinStrL              ! residual central line intensity
+    REAL(4), INTENT(OUT) :: LinStrL              ! central line depth
 
     ! hc/k for wavelength in Angstrom [Ang K]
     REAL(8), PARAMETER :: PlkC1 = Hc * Vc * 1d13 / Kbolt
@@ -1764,7 +1802,7 @@ CONTAINS
       CALL LocPrfSph(IntL, ContOpacL + LineOpacL, Src)
     END IF
 
-    ! single angle: residual intensity at this angle
+    ! single angle: depth at this angle
     IF (Nmu == 1) THEN
       LinStrL = REAL(1d0 - IntL(1) / IntC(1), 4)
       RETURN
@@ -1778,7 +1816,7 @@ CONTAINS
       FlxC = FlxC + Wmu(i) * IntC(i)
     END DO
 
-    ! residual line intensity of the disk-integrated profile
+    ! line depth of the disk-integrated profile
     LinStrL = REAL(1d0 - FlxL / FlxC, 4)
 
   END SUBROUTINE LinStrCalc

@@ -15,16 +15,17 @@
 !   HEMIOP   He- free-free
 !   HERAOP   Rayleigh scattering by He I
 !   COOLOP   C I, Mg I, Al I, Si I and Fe I bound-free, CH and OH bound-free and
-!            photodissociation, H2-H2, H2-He and H2-H collision-induced absorption,
-!            H2- free-free
+!            photodissociation, NH photodissociation, H2-H2, H2-He and H2-H
+!            collision-induced absorption, H2- free-free
 !   LUKEOP   C II, Mg II, Si II, N I, O I and Ca II bound-free
 !   HOTOP    bound-free of selected C II-IV, N II-V, O II-VI and Ne I-VI levels,
-!            free-free of the first five ions of C, N, O, Ne, Mg, Si, S and Fe
+!            free-free of the first five ions of C, N, O, Ne, Mg, Si and S and the first four of Fe
 !   ELECOP   Thomson scattering by free electrons
 !   H2RAOP   Rayleigh scattering by H2
 !
 ! The implementation largely follows the continuous opacity routines in the ATLAS12
 ! code by R. L. Kurucz, with bug corrections and updated data for selected sources.
+! Large generated tables (collision-induced absorption, NH) are kept in contop_data.f90.
 !
 ! =============================================================================================
 
@@ -32,7 +33,7 @@ MODULE Contop
 
   USE Constants
   USE AtmosData
-  USE CiaData
+  USE ContopData
 
   IMPLICIT NONE
 
@@ -42,7 +43,7 @@ MODULE Contop
   REAL(8), ALLOCATABLE :: T(:), Tlog(:), Tkev(:), Tk(:), Hkt(:), &
     Ehvkt(:), Stim(:), Xne(:), Xna(:), Rho(:)
   INTEGER :: Ifop(20), IxH1, IxH2, IxHe1, IxHe2, IxHe3, IxHmin, IxHmol, &
-    IxC1, IxC2, IxN1, IxO1, IxMg1, IxMg2, IxAl1, IxSi1, IxSi2, IxCa2, IxFe1, IxCH, IxOH
+    IxC1, IxC2, IxN1, IxO1, IxMg1, IxMg2, IxAl1, IxSi1, IxSi2, IxCa2, IxFe1, IxCH, IxOH, IxNH
   INTEGER :: IxHot(6, 8)   ! HOTOP species: stages I-VI of C, N, O, Ne, Mg, Si, S, Fe
 
   ! Si II log-opacity lookup table (pure atomic data, built once by Si2opInit)
@@ -51,8 +52,8 @@ MODULE Contop
 
   ! Temperature-dependent quantities precomputed once per model atmosphere by ContopInit:
   ! hc/kT, level Boltzmann factors and excitation/ionization factors for HE1OP and the 
-  ! COOLOP/LUKEOP member routines, the logarithms of the H- and H2- free-free tables and the
-  ! ionization populations used by HOTOP
+  ! COOLOP/LUKEOP member routines, the logarithms of the H- and H2- free-free tables, the
+  ! ionization populations used by HOTOP and the NH cross-sections at the depth temperatures
   REAL(8), ALLOCATABLE :: Hckt(:)
   REAL(8), ALLOCATABLE :: BoltHe1(:,:), BoltnHe1(:,:), BoltexHe1(:), ExlimHe1(:), FreetHe1(:)
   REAL(8), ALLOCATABLE :: BoltC1(:,:), BoltMg1(:,:), BoltSi1(:,:), BoltFe1(:,:), &
@@ -64,6 +65,16 @@ MODULE Contop
   REAL(8), ALLOCATABLE :: HotexpTkev(:,:)
   REAL(8), ALLOCATABLE :: H2mLk(:,:)
   REAL(8) :: HmWfflog(22), HmFflog(22,11), H2mWlog(18)
+  REAL(8), ALLOCATABLE :: NhSig(:,:), NhNrho(:)
+  REAL(8), ALLOCATABLE :: BoltN1(:,:), BoltCa2(:,:), PsExp0(:,:), PsExp1(:,:), Si2Tf(:), Si2Bn(:)
+  INTEGER, ALLOCATABLE :: Si2It(:)
+
+  ! Series limits and edges of the hydrogenic pseudo-continua of C1OP, MG1OP, SI1OP, C2OP (2), MG2OP
+  REAL(8), PARAMETER :: PsRyd = 109732.298D0
+  REAL(8), PARAMETER :: PsElim(6) = (/ 90820.42D0, 61671.02D0, 65747.55D0, 196664.7D0, &
+    196664.7D0 + 52367.06D0, 121267.61D0 /)
+  REAL(8), PARAMETER :: PsEdge(6) = (/ PsRyd / 16.D0, PsRyd / 25.D0, PsRyd / 25.D0, &
+    PsRyd * 4.D0 / 36.D0, PsRyd * 4.D0 / 16.D0, PsRyd * 4.D0 / 64.D0 /)
 
   ! Level data of the routines above, shared with ContopInit
   REAL(8), PARAMETER :: GHe1(10) = (/ 1.D0, 3.D0, 1.D0, 9.D0, 3.D0, 3.D0, 1.D0, 9.D0, 20.D0, 3.D0 /)
@@ -282,12 +293,12 @@ MODULE Contop
     SigHmol = 0d0
     
     ! Call individual opacity routines
-    IF (ABS(Ifop( 1)) == 1) CALL HOP(Ahyd, IxH1, IxH2)
+    IF (ABS(Ifop( 1)) == 1) CALL HOP(Ahyd)
     IF (Ifop( 2) == 1) CALL H2PLOP(Ah2p, IxH1, IxH2)
     IF (Ifop( 3) == 1) CALL HMINOP(Ahmin, IxH1, IxHmin)
     IF (Ifop( 4) == 1) CALL HRAYOP(SigH, IxH1)
-    IF (Ifop( 5) == 1) CALL HE1OP(Ahe1, IxHe1, IxHe2)
-    IF (Ifop( 6) == 1) CALL HE2OP(Ahe2, IxHe2, IxHe3)
+    IF (Ifop( 5) == 1) CALL HE1OP(Ahe1)
+    IF (Ifop( 6) == 1) CALL HE2OP(Ahe2)
     IF (Ifop( 7) == 1) CALL HEMIOP(Ahemin, IxHe1)
     IF (Ifop( 8) == 1) CALL HERAOP(SigHe, IxHe1)
     IF (Ifop( 9) == 1) CALL COOLOP(Acool)    
@@ -307,7 +318,7 @@ MODULE Contop
   ! arrays and species indices are set and before any calls to Xcont
   SUBROUTINE ContopInit
     REAL(8) :: XrlogHe(Ntau)
-    REAL(8) :: Nh1, Xr, Bltarg, Bltlog, Exllog, Xrlog, Thlog, Dth
+    REAL(8) :: Nh1, Xr, Bltarg, Bltlog, Exllog, Xrlog, Thlog, Dth, Wnhi, Tlog10
     INTEGER :: i, j, l, n, itau
 
     ! build the Si II log-opacity lookup table (pure atomic data, first call only)
@@ -316,7 +327,8 @@ MODULE Contop
     IF (ALLOCATED(Hckt)) DEALLOCATE(Hckt, BoltHe1, BoltnHe1, BoltexHe1, ExlimHe1, &
       FreetHe1, BoltC1, BoltMg1, BoltSi1, BoltFe1, BoltC2, BoltMg2, &
       Xnfc, Xnfn, Xnfo, Xnfne, Xnfmg, Xnfsi, Xnfs, Xnffe, Xnfp, &
-      BoltH, BoltexH, ExlimH, FreetH, BoltHe2, BoltexHe2, ExlimHe2, FreetHe2, HotexpTkev, H2mLk)
+      BoltH, BoltexH, ExlimH, FreetH, BoltHe2, BoltexHe2, ExlimHe2, FreetHe2, HotexpTkev, H2mLk, &
+      NhSig, NhNrho, BoltN1, BoltCa2, PsExp0, PsExp1, Si2It, Si2Tf, Si2Bn)
     ALLOCATE(Hckt(Ntau), BoltHe1(Ntau, 10), BoltnHe1(Ntau, 4:27), BoltexHe1(Ntau), &
       ExlimHe1(Ntau), FreetHe1(Ntau), BoltC1(25, Ntau), BoltMg1(15, Ntau), &
       BoltSi1(33, Ntau), BoltFe1(48, Ntau), BoltC2(34, Ntau), BoltMg2(14, Ntau), &
@@ -324,7 +336,8 @@ MODULE Contop
       Xnfsi(6, Ntau), Xnfs(6, Ntau), Xnffe(6, Ntau), Xnfp(21, Ntau), &
       BoltH(Ntau, 8), BoltexH(Ntau), ExlimH(Ntau), FreetH(Ntau), &
       BoltHe2(9, Ntau), BoltexHe2(Ntau), ExlimHe2(Ntau), FreetHe2(Ntau), HotexpTkev(60, Ntau), &
-      H2mLk(18, Ntau))
+      H2mLk(18, Ntau), NhSig(Ntau, NhNwl), NhNrho(Ntau), BoltN1(Ntau, 2), BoltCa2(Ntau, 2), &
+      PsExp0(Ntau, 6), PsExp1(Ntau, 6), Si2It(Ntau), Si2Tf(Ntau), Si2Bn(Ntau))
 
     ! hc/kT in cm
     Hckt = Clightcm * Hkt
@@ -338,6 +351,27 @@ MODULE Contop
       BoltFe1(:, j) = GFe1 * EXP(-EFe1 * Clightcm * Hkt(j))
       BoltC2(:, j)  = GlevC2  * EXP(-ElevC2  * Hckt(j))
       BoltMg2(:, j) = GlevMg2 * EXP(-ElevMg2 * Hckt(j))
+    END DO
+
+    ! Boltzmann factors of N1OP and CA2OP
+    BoltN1(:, 1) = 6.D0 * EXP(-3.575D0 / Tkev)
+    BoltN1(:, 2) = 10.D0 * EXP(-2.384D0 / Tkev)
+    BoltCa2(:, 1) = 10.D0 * EXP(-1.697D0 / Tkev)
+    BoltCa2(:, 2) = 6.D0 * EXP(-3.142D0 / Tkev)
+
+    ! Pseudo-continuum exponentials at the series limits and edges
+    DO n = 1, 6
+      PsExp0(:, n) = EXP(-PsElim(n) * Hckt)
+      PsExp1(:, n) = EXP(-(PsElim(n) - PsEdge(n)) * Hckt)
+    END DO
+
+    ! SI2OP temperature interpolation and long-wavelength factors
+    DO j = 1, Ntau
+      Tlog10 = Tlog(j) / 2.30258509299405D0
+      Si2It(j) = MAX(MIN(INT((Tlog10 - 3.48D0) / 0.02D0), 50), 1)
+      Si2Tf(j) = (Tlog10 - 3.48D0 - REAL(Si2It(j), 8) * 0.02D0) / 0.02D0
+      Si2Bn(j) = (1.D0 * EXP(-131838.4D0 * Hckt(j)) + 9.D0 * EXP(-184563.09D0 * Hckt(j))) / &
+                 (109732.298D0 * 4.D0 * Hckt(j))
     END DO
 
     ! He I level populations and free-free/pseudo-continuum factors (HE1OP)
@@ -369,6 +403,20 @@ MODULE Contop
       END DO
       Dth = (Thlog - LOG(H2mTheta(n))) / (LOG(H2mTheta(n + 1)) - LOG(H2mTheta(n)))
       H2mLk(:, j) = LOG(H2mFf(:, n) * 1.D-26) * (1.D0 - Dth) + LOG(H2mFf(:, n + 1) * 1.D-26) * Dth
+    END DO
+
+    ! NH cross-sections at the table wavelengths and the temperature of each depth (NHOP)
+    NhSig = 0.D0
+    NhNrho = 0.D0
+    DO j = 1, Ntau
+      IF (T(j) < NhT(1) .OR. T(j) > NhT(NhNt)) CYCLE
+      n = 1
+      DO WHILE (n < NhNt - 1 .AND. T(j) > NhT(n + 1))
+        n = n + 1
+      END DO
+      Wnhi = (1.D0 / T(j) - 1.D0 / NhT(n)) / (1.D0 / NhT(n + 1) - 1.D0 / NhT(n))
+      NhSig(j, :) = 10.D0**(NhLog(n, :) + (NhLog(n + 1, :) - NhLog(n, :)) * Wnhi)
+      NhNrho(j) = Fraction(IxNH, j) / Rho(j)
     END DO
 
     ! H I level populations and free-free/pseudo-continuum factors (HOP)
@@ -422,9 +470,7 @@ MODULE Contop
     ! from the EOS solution for consistency with all other continuum opacity sources:
     ! the Xnf* arrays hold the ion number densities (free-free part) and Xnfp the
     ! number densities divided by partition functions for the species of the
-    ! bound-free edge table, as in ATLAS12. Note that SME instead feeds unnormalized
-    ! XSAHA ionization fractions to these expressions, which effectively disables its
-    ! high-ion opacity
+    ! bound-free edge table, as in ATLAS12.
     Xnfc = 0.0D0; Xnfn = 0.0D0; Xnfo = 0.0D0; Xnfne = 0.0D0
     Xnfmg = 0.0D0; Xnfsi = 0.0D0; Xnfs = 0.0D0; Xnffe = 0.0D0
     DO itau = 1, Ntau
@@ -1030,14 +1076,14 @@ MODULE Contop
     Xkarzas = EXP(X * 2.30258509299405D0) / Zeff2
   END FUNCTION XKARZAS
 
-  SUBROUTINE HOP(Ahyd, Ih1, Ih2)
+  SUBROUTINE HOP(Ahyd)
     REAL(8), INTENT(OUT) :: Ahyd(Ntau)
-    INTEGER, INTENT(IN) :: Ih1, Ih2
     REAL(8) :: Cont(8), H, Cfree, Ex, C, Freq3
     INTEGER :: j, n
 
     DO n = 1, 8
-      Cont(n) = Coulx(n, Freq, 1.D0)
+      ! Cont(n) = Coulx(n, Freq, 1.D0)
+      Cont(n) = Xkarzas(Freq, 1.D0, n, n)
     END DO
 
     Freq3 = Freq**3
@@ -1111,7 +1157,7 @@ MODULE Contop
         0.5D0, 0.6D0, 0.8D0, 1.0D0, 1.2D0, 1.4D0, 1.6D0, 1.8D0, 2.0D0, 2.8D0, 3.6D0 /)
     REAL(8) :: Fftt(11), Theta(Ntau), Fftheta(Ntau)
     REAL(8) :: WaveL(1), Wavelog(1), Fftlog(1), H, Hminbf(1), Hminff
-    INTEGER :: j, iwave, itheta, Maxwave
+    INTEGER :: j, itheta, Maxwave
 
     Theta = 5040.D0 / T
     WaveL(1) = Clight / Freq * 0.1D0
@@ -1123,8 +1169,8 @@ MODULE Contop
     
     Hminbf(1) = 0.D0
     IF (Freq > 1.82365D14) Maxwave = Map1(Wbf, Bf, 85, WaveL, Hminbf, 1)
-    ! NOTE: correction with respect to ATLAS12 and SME, which extrapolate the tabulated
-    ! cross-section linearly below its 18 nm edge, yielding negative values below ~13 nm
+    ! Correction with respect to ATLAS12, which extrapolates the tabulated cross-section 
+    ! linearly below its 18 nm edge, yielding negative values below ~13 nm
     Hminbf(1) = MAX(Hminbf(1), 0.D0)
     DO j = 1, Ntau
       CALL Linter(Thetaff, Fftt, 11, Theta(j:j), Fftheta(j:j), 1)
@@ -1138,8 +1184,7 @@ MODULE Contop
   ! 1s2 1S ground state (Marr & West 1976) and the 1s2s/1s2p states (following Mathisen 1984),
   ! Karzas & Latter cross-sections for the 1s3l states, hydrogenic treatment of n=4-27, and
   ! photoionization channels from n=2 and n=3 states leaving He II in the n=2 and n=3 states
-  SUBROUTINE HE1OP(Ahe1, IHe1, IHe2)
-    INTEGER, INTENT(IN) :: IHe1, IHe2
+  SUBROUTINE HE1OP(Ahe1)
     REAL(8), INTENT(OUT) :: Ahe1(Ntau)
     REAL(8), PARAMETER :: Hefreq(10) = (/ &
       5.9452090D15, 1.1528440D15, 0.9603331D15, 0.8761076D15, &
@@ -1440,9 +1485,8 @@ MODULE Contop
     He12p3P = 10.D0**X
   END FUNCTION HE12P3P
 
-  SUBROUTINE HE2OP(Ahe2, IHe2, IHe3)
+  SUBROUTINE HE2OP(Ahe2)
     REAL(8), INTENT(OUT) :: Ahe2(Ntau)
-    INTEGER, INTENT(IN) :: IHe2, IHe3
     REAL(8) :: He2, C, Cfree, Ex, Freq3
     REAL(8) :: Cont(9)
     INTEGER :: j, n
@@ -1496,10 +1540,11 @@ MODULE Contop
 
   ! Cool-star metal and molecular continuum opacity following ATLAS12: C I, Mg I, Al I,
   ! Si I, Fe I bound-free, CH and OH photodissociation, H2-H2, H2-He and H2-H collision-induced
-  ! absorption and H2- free-free
+  ! absorption, H2- free-free and NH photodissociation
   SUBROUTINE Coolop(Acool)
     REAL(8), INTENT(OUT) :: Acool(Ntau)
-    REAL(8), DIMENSION(Ntau) :: Ac1, Amg1, Asi1, Ach, Aoh, Ah2coll, Ah2min
+    REAL(8), DIMENSION(Ntau) :: Ac1, Amg1, Asi1, Ach, Aoh, Ah2coll, Ah2min, Anh, Afe1
+    REAL(8) :: Xal1
     INTEGER :: j
 
     Acool = 0.0D0
@@ -1513,10 +1558,13 @@ MODULE Contop
     CALL OHop(Aoh)
     CALL H2collop(Ah2coll)
     CALL H2minop(Ah2min)
+    CALL NHop(Anh)
+    CALL Fe1op(Afe1)
+    Xal1 = Al1op()
     DO j = 1, Ntau
       Acool(j) = Ac1(j) + Amg1(j) + Asi1(j) + Ach(j) + Aoh(j) + Ah2coll(j) + Ah2min(j) + &
-        ( Al1op(j) * FractionPF(IxAl1, j) + &
-          Fe1op(j) * FractionPF(IxFe1, j) ) * Stim(j) / Rho(j)
+        Anh(j) + ( Xal1 * FractionPF(IxAl1, j) + &
+          Afe1(j) * FractionPF(IxFe1, j) ) * Stim(j) / Rho(j)
     END DO
   END SUBROUTINE Coolop
 
@@ -1529,7 +1577,8 @@ MODULE Contop
     INTEGER, PARAMETER :: Lryd(14) = (/ 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 0, 0 /)
     REAL(8), PARAMETER :: Ryd = 109732.298D0
     REAL(8) :: X(25)
-    REAL(8) :: Waveno, Freq3, Elim, Zeff2, Eps, Xs0, Xs1, Xd0, Xd1, Xd2, H
+    REAL(8) :: Waveno, Freq3, Elim, Zeff2, Eps, Xs0, Xs1, Xd0, Xd1, Xd2, H, E1
+    LOGICAL :: Blue
     INTEGER :: i, j
 
     Waveno = Freq / Clightcm
@@ -1605,10 +1654,11 @@ MODULE Contop
     END DO
 
     ! hydrogenic n>=4 pseudo-continuum plus sum over explicit levels
-    Elim = 90820.42D0
+    Blue = PsElim(1) - PsEdge(1) >= PsElim(1) - Waveno
     DO j = 1, Ntau
-      H = Freq3 * 6.D0 / (Ryd * Hckt(j)) * &
-        (EXP(-MAX(Elim - Ryd / 16.D0, Elim - Waveno) * Hckt(j)) - EXP(-Elim * Hckt(j)))
+      E1 = PsExp1(j, 1)
+      IF (.NOT. Blue) E1 = EXP(-(PsElim(1) - Waveno) * Hckt(j))
+      H = Freq3 * 6.D0 / (Ryd * Hckt(j)) * (E1 - PsExp0(j, 1))
       DO i = 1, 25
         H = H + X(i) * BoltC1(i, j)
       END DO
@@ -1623,7 +1673,8 @@ MODULE Contop
     REAL(8), INTENT(OUT) :: Amg1(Ntau)
     REAL(8), PARAMETER :: Ryd = 109732.298D0, Elim = 61671.02D0
     REAL(8) :: X(15)
-    REAL(8) :: Waveno, Freq3, Zeff2, H
+    REAL(8) :: Waveno, Freq3, H, E1
+    LOGICAL :: Blue
     INTEGER :: i, j
 
     Waveno = Freq / Clightcm
@@ -1678,9 +1729,11 @@ MODULE Contop
     END DO LEVELS
 
     ! hydrogenic n>=5 pseudo-continuum plus sum over explicit levels
+    Blue = PsElim(2) - PsEdge(2) >= PsElim(2) - Waveno
     DO j = 1, Ntau
-      H = Freq3 * 2.D0 / (Ryd * Hckt(j)) * &
-        (EXP(-MAX(Elim - Ryd / 25.D0, Elim - Waveno) * Hckt(j)) - EXP(-Elim * Hckt(j)))
+      E1 = PsExp1(j, 2)
+      IF (.NOT. Blue) E1 = EXP(-(PsElim(2) - Waveno) * Hckt(j))
+      H = Freq3 * 2.D0 / (Ryd * Hckt(j)) * (E1 - PsExp0(j, 2))
       DO i = 1, 15
         H = H + X(i) * BoltMg1(i, j)
       END DO
@@ -1690,8 +1743,7 @@ MODULE Contop
 
   ! Al I bound-free cross-section times partition function following ATLAS12:
   ! photoionization from the two fine-structure components of the 3s2 3p 2P ground term
-  REAL(8) FUNCTION AL1OP(j)
-    INTEGER, INTENT(IN) :: j
+  REAL(8) FUNCTION AL1OP()
     REAL(8), PARAMETER :: Elim = 48278.37D0
     REAL(8) :: Waveno
 
@@ -1714,7 +1766,8 @@ MODULE Contop
     INTEGER, PARAMETER :: Lryd(22) = (/ 2, 3, 2, 2, 2, 3, 2, 2, 2, 2, 2, 1, 2, 1, 2, 1, 1, 1, 2, 1, 0, 0 /)
     REAL(8), PARAMETER :: Ryd = 109732.298D0
     REAL(8) :: X(33)
-    REAL(8) :: Waveno, Freq3, Elim, Zeff2, Eps, Reson1, H
+    REAL(8) :: Waveno, Freq3, Elim, Zeff2, Eps, Reson1, H, E1
+    LOGICAL :: Blue
     INTEGER :: i, j
 
     Waveno = Freq / Clightcm
@@ -1751,10 +1804,8 @@ MODULE Contop
         X(25) = 93.D-18 * (65524.393D0 / Waveno)**4.00D0 / 3.D0
       END IF
       ! 3s2 3p2 3P1
-      ! NOTE: correction with respect to ATLAS12 and SME, which both use
-      ! weight 2/3 here. That makes the 2P1/2 + 2P3/2 branches of this level sum to 4/3
-      ! of the total cross-section, violating flux conservation; all other levels, and
-      ! the analogous C I 2s2 2p2 3P1 level in C1OP, use the statistical 1/3 + 2/3 split.
+      ! Correction with respect to ATLAS12, which uses weight 2/3 here. 
+      ! That makes the 2P1/2 + 2P3/2 branches of this level sum to 4/3.
       ! The statistical weight 1/3 is used here.
       IF (Waveno < Elim - ElevSi1(26)) EXIT PASS1
       IF (Waveno <= 74000.D0) THEN
@@ -1813,10 +1864,11 @@ MODULE Contop
     END DO
 
     ! hydrogenic n>=5 pseudo-continuum plus sum over explicit levels
-    Elim = 65747.55D0
+    Blue = PsElim(3) - PsEdge(3) >= PsElim(3) - Waveno
     DO j = 1, Ntau
-      H = Freq3 * 6.D0 / (Ryd * Hckt(j)) * &
-        (EXP(-MAX(Elim - Ryd / 25.D0, Elim - Waveno) * Hckt(j)) - EXP(-Elim * Hckt(j)))
+      E1 = PsExp1(j, 3)
+      IF (.NOT. Blue) E1 = EXP(-(PsElim(3) - Waveno) * Hckt(j))
+      H = Freq3 * 6.D0 / (Ryd * Hckt(j)) * (E1 - PsExp0(j, 3))
       DO i = 1, 33
         H = H + X(i) * BoltSi1(i, j)
       END DO
@@ -1824,9 +1876,10 @@ MODULE Contop
     END DO
   END SUBROUTINE SI1OP
 
-  REAL(8) FUNCTION Fe1op(j)
-    INTEGER, INTENT(IN) :: j
+  SUBROUTINE FE1OP(Afe1)
+    REAL(8), INTENT(OUT) :: Afe1(Ntau)
     REAL(8) :: Waveno, Xsect(48), Xxx(48)
+    INTEGER :: j
     REAL(8), PARAMETER :: Wno(48) = (/ &
       63500.D0, 58500.D0, 53500.D0, 59500.D0, 45000.D0, 44500.D0, 44500.D0, &
       43000.D0, 58000.D0, 41000.D0, 54000.D0, 40000.D0, 40000.D0, 57500.D0, &
@@ -1836,19 +1889,19 @@ MODULE Contop
       29000.D0, 27000.D0, 54000.D0, 27500.D0, 24000.D0, 47000.D0, 23000.D0, &
       44000.D0, 42000.D0, 42000.D0, 21000.D0, 42000.D0, 42000.D0 /)
 
+    Afe1 = 0.D0
     Waveno = Freq / Clightcm
-    IF (Waveno < 21000.D0) THEN
-      Fe1op = 0.D0
-      RETURN
-    END IF
+    IF (Waveno < 21000.D0) RETURN
     Xxx = (Wno + 3000.D0 - Waveno) / Wno / 0.1D0
     WHERE (Wno < Waveno)
       Xsect = 3.D-18 / (1.D0 + Xxx**4)
     ELSEWHERE
       Xsect = 0.D0
     END WHERE
-    Fe1op = SUM(Xsect * BoltFe1(:, j))
-  END FUNCTION Fe1op
+    DO j = 1, Ntau
+      Afe1(j) = SUM(Xsect * BoltFe1(:, j))
+    END DO
+  END SUBROUTINE FE1OP
 
   ! CH bound-free + photodissociation cross-section times partition function:
   ! log10 cross-sections on a 0.1 eV x 500 K grid (2-10.5 eV, 2000-9000 K); 
@@ -2278,11 +2331,11 @@ MODULE Contop
   END SUBROUTINE OHOP
 
   ! H2-H2, H2-He and H2-H collision-induced absorption from Borysow, Jorgensen & Fu (2001),
-  ! Jorgensen et al. (2000) and Gustafsson & Frommhold (2003), tabulated in CiaData as log10
+  ! Jorgensen et al. (2000) and Gustafsson & Frommhold (2003), tabulated as log10
   ! binary absorption coefficients on a 50 cm^-1 x 500 K grid (50-20000 cm^-1, 1000-7000 K).
   ! No extrapolation in wavenumber (H2-H data end at 10000 cm^-1); temperatures outside the
   ! grid are clamped, and above 2500 K the H2-H table follows the H2-H2 temperature
-  ! dependence (see tools/make_cia_data.py). The tabulated coefficients include stimulated
+  ! dependence. The tabulated coefficients include stimulated
   ! emission, so no Stim factor is applied (ATLAS12 applies it a second time). H2, He I and
   ! H I number densities are taken from the EOS. Returns opacity per gram
   SUBROUTINE H2COLLOP(Ah2coll)
@@ -2342,21 +2395,47 @@ MODULE Contop
     END DO
   END SUBROUTINE H2MINOP
 
+  ! NH photodissociation opacity from the smoothed LTE cross-sections per NH molecule of
+  ! P. C. Stancil (table NhLog in contop_data.f90, 910-5200 A, 500-10000 K): the cross-sections
+  ! at the table wavelengths and the depth temperatures (NhSig, from ContopInit) are
+  ! interpolated linearly in wavelength. Zero outside the tabulated wavelengths and
+  ! temperatures. Returns opacity per gram
+  SUBROUTINE NHOP(Anh)
+    REAL(8), INTENT(OUT) :: Anh(Ntau)
+    REAL(8) :: Wl, Dw
+    INTEGER :: i
+
+    Anh = 0.D0
+    Wl = Clight / Freq
+    IF (Wl < NhWl0 .OR. Wl > NhWl0 + NhDwl * (NhNwl - 1)) RETURN
+
+    ! wavelength interval; the last node closes the last interval
+    i = MIN(INT((Wl - NhWl0) / NhDwl) + 1, NhNwl - 1)
+    Dw = (Wl - NhWl0) / NhDwl - REAL(i - 1, 8)
+
+    ! cross-section times number density per gram, with stimulated emission
+    Anh = (NhSig(:, i) + (NhSig(:, i + 1) - NhSig(:, i)) * Dw) * NhNrho * Stim
+  END SUBROUTINE NHOP
+
   ! Warm-star metal continuum opacity following ATLAS12: multi-level C II, Mg II and
   ! Si II bound-free plus N I, O I and Ca II cross-section functions
   SUBROUTINE Lukeop(Aluke)
     REAL(8), INTENT(OUT) :: Aluke(Ntau)
-    REAL(8), DIMENSION(Ntau) :: Ac2, Amg2, Asi2
+    REAL(8), DIMENSION(Ntau) :: Ac2, Amg2, Asi2, An1, Aca2
+    REAL(8) :: Xo1
     INTEGER :: j
 
     CALL C2op(Ac2)
     CALL Mg2op(Amg2)
     CALL Si2op(Asi2)
+    CALL N1op(An1)
+    CALL Ca2op(Aca2)
+    Xo1 = O1op()
     DO j = 1, Ntau
       Aluke(j) = Ac2(j) + Amg2(j) + Asi2(j) + &
-        ( N1op(j)  * FractionPF(IxN1, j) + &
-          O1op(j)  * FractionPF(IxO1, j) + &
-          Ca2op(j) * FractionPF(IxCa2, j) ) * Stim(j) / Rho(j)
+        ( An1(j)  * FractionPF(IxN1, j) + &
+          Xo1     * FractionPF(IxO1, j) + &
+          Aca2(j) * FractionPF(IxCa2, j) ) * Stim(j) / Rho(j)
     END DO
   END SUBROUTINE Lukeop
 
@@ -2372,7 +2451,8 @@ MODULE Contop
     INTEGER, PARAMETER :: Llv2(14:27) = (/ 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 0, 0 /)
     REAL(8), PARAMETER :: Ryd = 109732.298D0
     REAL(8) :: X(34)
-    REAL(8) :: Waveno, Freq3, Elim, Zeff2, H
+    REAL(8) :: Waveno, Freq3, Elim, Zeff2, H, E1
+    LOGICAL :: Blue1, Blue2
     INTEGER :: i, j
 
     Waveno = Freq / Clightcm
@@ -2404,15 +2484,17 @@ MODULE Contop
     END DO
 
     ! hydrogenic pseudo-continua plus sum over explicit levels
+    Blue1 = PsElim(4) - PsEdge(4) >= PsElim(4) - Waveno
+    Blue2 = PsElim(5) - PsEdge(5) >= PsElim(5) - Waveno
     DO j = 1, Ntau
       ! 2s2 nl, n=6 to infinity
-      Elim = 196664.7D0
-      H = Freq3 * 1.D0 / (Ryd * 4.D0 * Hckt(j)) * &
-        (EXP(-MAX(Elim - Ryd * 4.D0 / 36.D0, Elim - Waveno) * Hckt(j)) - EXP(-Elim * Hckt(j)))
+      E1 = PsExp1(j, 4)
+      IF (.NOT. Blue1) E1 = EXP(-(PsElim(4) - Waveno) * Hckt(j))
+      H = Freq3 * 1.D0 / (Ryd * 4.D0 * Hckt(j)) * (E1 - PsExp0(j, 4))
       ! 2s2p nl, n=4 to infinity
-      Elim = 196664.7D0 + 52367.06D0
-      H = H + Freq3 * 9.D0 / (Ryd * 4.D0 * Hckt(j)) * &
-        (EXP(-MAX(Elim - Ryd * 4.D0 / 16.D0, Elim - Waveno) * Hckt(j)) - EXP(-Elim * Hckt(j)))
+      E1 = PsExp1(j, 5)
+      IF (.NOT. Blue2) E1 = EXP(-(PsElim(5) - Waveno) * Hckt(j))
+      H = H + Freq3 * 9.D0 / (Ryd * 4.D0 * Hckt(j)) * (E1 - PsExp0(j, 5))
       DO i = 1, 34
         H = H + X(i) * BoltC2(i, j)
       END DO
@@ -2420,23 +2502,20 @@ MODULE Contop
     END DO
   END SUBROUTINE C2OP
 
-  REAL(8) FUNCTION N1op(j)
-    INTEGER, INTENT(IN) :: j
-    REAL(8) :: C1130, C1020, X1130, X1020, X853
+  SUBROUTINE N1OP(An1)
+    REAL(8), INTENT(OUT) :: An1(Ntau)
+    REAL(8) :: X1130, X1020, X853
 
-    C1130 = 6.D0 * EXP(-3.575D0 / Tkev(j))
-    C1020 = 10.D0 * EXP(-2.384D0 / Tkev(j))
     X1130 = 0.D0
     X1020 = 0.D0
     X853  = 0.D0
     IF (Freq >= 3.517915D15) X853 = Seaton(3.517915D15, 1.142D-17, 2.D0, 4.29D0)
     IF (Freq >= 2.941534D15) X1020 = Seaton(2.941534D15, 4.410D-18, 1.5D0, 3.85D0)
     IF (Freq >= 2.653317D15) X1130 = Seaton(2.653317D15, 4.200D-18, 1.5D0, 4.34D0)
-    N1op = X853 * 4.D0 + X1020 * C1020 + X1130 * C1130
-  END FUNCTION N1op
+    An1 = X853 * 4.D0 + X1020 * BoltN1(:, 2) + X1130 * BoltN1(:, 1)
+  END SUBROUTINE N1OP
 
-  REAL(8) FUNCTION O1op(j)
-    INTEGER, INTENT(IN) :: j
+  REAL(8) FUNCTION O1op()
 
     IF (Freq >= 3.28805D15) THEN
       O1op = 9.D0 * Seaton(3.28805D15, 2.94D-18, 1.D0, 2.66D0)
@@ -2455,7 +2534,8 @@ MODULE Contop
     INTEGER, PARAMETER :: Llv(13) = (/ 7, 6, 4, 3, 2, 1, 0, 3, 2, 1, 0, 2, 1 /)
     REAL(8), PARAMETER :: Ryd = 109732.298D0, Elim = 121267.61D0
     REAL(8) :: X(14)
-    REAL(8) :: Waveno, Freq3, Zeff2, H
+    REAL(8) :: Waveno, Freq3, Zeff2, H, E1
+    LOGICAL :: Blue
     INTEGER :: i, j
 
     Waveno = Freq / Clightcm
@@ -2474,9 +2554,11 @@ MODULE Contop
                           5.700D0 * ((Elim - ElevMg2(14)) / Waveno)**5)
 
     ! hydrogenic n>=8 pseudo-continuum plus sum over explicit levels
+    Blue = PsElim(6) - PsEdge(6) >= PsElim(6) - Waveno
     DO j = 1, Ntau
-      H = Freq3 / (Ryd * 4.D0 * Hckt(j)) * &
-        (EXP(-MAX(Elim - Ryd * 4.D0 / 64.D0, Elim - Waveno) * Hckt(j)) - EXP(-Elim * Hckt(j)))
+      E1 = PsExp1(j, 6)
+      IF (.NOT. Blue) E1 = EXP(-(PsElim(6) - Waveno) * Hckt(j))
+      H = Freq3 / (Ryd * 4.D0 * Hckt(j)) * (E1 - PsExp0(j, 6))
       DO i = 1, 14
         H = H + X(i) * BoltMg2(i, j)
       END DO
@@ -2489,20 +2571,16 @@ MODULE Contop
   ! range the analytic high-level free-bound limit is used; returns opacity per gram
   SUBROUTINE SI2OP(Asi2)
     REAL(8), INTENT(OUT) :: Asi2(Ntau)
-    REAL(8), PARAMETER :: Ryd = 109732.298D0
-    REAL(8) :: Waveno, Freq3, Boltn, Tlog10, Tfrac, Wfrac, H, Hcktj
+    REAL(8) :: Waveno, Freq3, Tfrac, Wfrac, H
     INTEGER :: j, it, iw
-
-    IF (.NOT. Si2Ready) CALL Si2opInit
 
     Waveno = Freq / Clightcm
     IF (Waveno >= 12192.48D0) THEN
       iw = MAX(MIN(INT(Waveno * 0.001D0), 199), 1)
       Wfrac = (Waveno - REAL(iw, 8) * 1000.D0) / 1000.D0
       DO j = 1, Ntau
-        Tlog10 = Tlog(j) / 2.30258509299405D0
-        it = MAX(MIN(INT((Tlog10 - 3.48D0) / 0.02D0), 50), 1)
-        Tfrac = (Tlog10 - 3.48D0 - REAL(it, 8) * 0.02D0) / 0.02D0
+        it = Si2It(j)
+        Tfrac = Si2Tf(j)
         H = (Si2Xtab(iw    , it) * (1.D0 - Tfrac) + Si2Xtab(iw    , it + 1) * Tfrac) * (1.D0 - Wfrac) + &
             (Si2Xtab(iw + 1, it) * (1.D0 - Tfrac) + Si2Xtab(iw + 1, it + 1) * Tfrac) * Wfrac
         Asi2(j) = EXP(H) * FractionPF(IxSi2, j) * Stim(j) / Rho(j)
@@ -2511,10 +2589,7 @@ MODULE Contop
       ! long-wavelength free-bound limit from very high levels of both parents
       Freq3 = 2.815D29 / Freq / Freq / Freq * 16.D0
       DO j = 1, Ntau
-        Hcktj = Clightcm * Hkt(j)
-        Boltn = (1.D0 * EXP(-131838.4D0 * Hcktj) + 9.D0 * EXP(-184563.09D0 * Hcktj)) / &
-                (Ryd * 4.D0 * Hcktj)
-        H = Freq3 * (1.D0 / Ehvkt(j) - 1.D0) * Boltn
+        H = Freq3 * (1.D0 / Ehvkt(j) - 1.D0) * Si2Bn(j)
         Asi2(j) = H * FractionPF(IxSi2, j) * Stim(j) / Rho(j)
       END DO
     END IF
@@ -2598,7 +2673,7 @@ MODULE Contop
       Freq3 = 2.815D29 / Freqtab / Freqtab / Freqtab * 16.D0
       X = 0.0D0
       DO i = 1, 11
-        IF (Wnotab < Tlev(i)) EXIT
+        IF (Wnotab < Tlev(i)) CYCLE
         X(i) = Xkarzas(Freqtab, Zeff2lev(i), Nlev(i), Llev(i))
       END DO
       DO i = 12, 37
@@ -2630,12 +2705,10 @@ MODULE Contop
     Si2Ready = .TRUE.
   END SUBROUTINE SI2OPINIT
 
-  REAL(8) FUNCTION Ca2op(j)
-    INTEGER, INTENT(IN) :: j
-    REAL(8) :: C1218, C1420, X1218, X1420, X1044, Xxx
+  SUBROUTINE CA2OP(Aca2)
+    REAL(8), INTENT(OUT) :: Aca2(Ntau)
+    REAL(8) :: X1218, X1420, X1044, Xxx
 
-    C1218 = 10.D0 * EXP(-1.697D0 / Tkev(j))
-    C1420 = 6.D0 * EXP(-3.142D0 / Tkev(j))
     X1044 = 0.D0
     X1218 = 0.D0
     X1420 = 0.D0
@@ -2650,8 +2723,8 @@ MODULE Contop
     IF (Freq >= 2.110779D15) THEN
       X1420 = Seaton(2.110779D15, 4.13D-18, 3.D0, 0.69D0)
     END IF
-    Ca2op = X1044 + X1218 * C1218 + X1420 * C1420
-  END FUNCTION Ca2op
+    Aca2 = X1044 + X1218 * BoltCa2(:, 1) + X1420 * BoltCa2(:, 2)
+  END SUBROUTINE CA2OP
 
   SUBROUTINE Hotop(Ahot)
     REAL(8), INTENT(OUT) :: Ahot(Ntau)

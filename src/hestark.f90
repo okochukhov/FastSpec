@@ -38,9 +38,6 @@ MODULE HeStark
   ! Conversion of width in Ang per 1e16 perturbers to angular frequency: 2*pi*c/1e16 [Ang/s]
   REAL(8), PARAMETER, PRIVATE :: HeGamCnv = 1.884d3
 
-  ! Table wavelengths in the run wavelength convention (air or vacuum), set by HeStarkInit
-  REAL(8), SAVE :: WlcHeRun(NheTab) = 0d0
-
   ! Per-depth Stark width [rad/s] and shift [Ang] of all tabulated He I lines,
   ! assembled once by HeStarkInit and shared read-only by the opacity kernel
   REAL(8), ALLOCATABLE, SAVE :: HeGam(:,:), HeShf(:,:)
@@ -329,19 +326,15 @@ MODULE HeStark
   CONTAINS
 
   ! Precompute per-depth Stark widths and shifts of all tabulated He I lines from the
-  ! electron, proton, and He II number densities, and set table wavelengths in the run
-  ! wavelength convention; call after the model atmosphere and EOS results are available,
-  ! before any XlineSetup call (the arrays are shared read-only state in OpenMP regions)
+  ! electron, proton, and He II number densities; call after the model atmosphere and EOS
+  ! results are available, before any XlineSetup call (the arrays are shared read-only state
+  ! in OpenMP regions)
   SUBROUTINE HeStarkInit
 
     INTEGER :: itau, k, j
     REAL(8) :: Tlg, w0, w1, w2, Xne, Xnp, Xnhe2, Gam
 
     IF (.NOT. ALLOCATED(HeGam)) ALLOCATE(HeGam(Ntau, NheTab), HeShf(Ntau, NheTab))
-
-    ! table wavelengths in the run wavelength convention
-    WlcHeRun = WlcHe
-    IF (Wvac) WlcHeRun = Air2Vac(WlcHe)
 
     DO itau = 1, Ntau
       Tlg = LOG10(Atmos(itau)%T)
@@ -377,8 +370,8 @@ MODULE HeStark
   END SUBROUTINE HeStarkInit
 
   ! Table entry matching a given central wavelength within HeMatchTol and lower level
-  ! energy within HeEloTol; 0 if no match. WaveL must be in the run wavelength
-  ! convention (air or vacuum); the energy test rejects chance wavelength coincidences
+  ! energy within HeEloTol; 0 if no match. WaveL must be in air; the energy test rejects
+  ! chance wavelength coincidences
   ! with lines of other transitions
   PURE INTEGER FUNCTION HeMatchIdx(WaveL, Elo)
 
@@ -387,7 +380,7 @@ MODULE HeStark
 
     HeMatchIdx = 0
     DO k = 1, NheTab
-      IF (ABS(WaveL - WlcHeRun(k)) <= HeMatchTol .AND. ABS(Elo - EloHe(k)) <= HeEloTol) THEN
+      IF (ABS(WaveL - WlcHe(k)) <= HeMatchTol .AND. ABS(Elo - EloHe(k)) <= HeEloTol) THEN
         HeMatchIdx = k
         RETURN
       END IF

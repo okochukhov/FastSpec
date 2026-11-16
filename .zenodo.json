@@ -21,6 +21,12 @@
   ],
   "related_identifiers": [
     {
+      "identifier": "10.1051/0004-6361/202662504",
+      "relation": "isDescribedBy",
+      "resource_type": "publication-article",
+      "scheme": "doi"
+    },
+    {
       "identifier": "arXiv:2610.31763",
       "relation": "isDescribedBy",
       "resource_type": "publication-preprint",

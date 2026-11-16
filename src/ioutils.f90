@@ -29,10 +29,10 @@ MODULE IOUtils
   ! Read the input file (keyword-driven format)
   SUBROUTINE ReadInputFile
 
-    INTEGER :: i, j, Ios, NfilesAlloc, Nmu_tmp, Nflags, MolBrdF, BfKurF, HydroF, Itmp
+    INTEGER :: i, j, Ios, NfilesAlloc, Nmu_tmp, Nflags, MolBrdF, HydroF, Itmp
     CHARACTER(1024) :: Line, Key, Val, NextLine
-    LOGICAL :: HasEqual, GotNext, GotWave, GotSave, GotLines, GotModel, SetNodes
-    REAL(8) :: MH
+    LOGICAL :: HasEqual, GotNext, GotWave, GotSave, GotLines, GotModel, SetNodes, GivenIn(99)
+    REAL(8) :: MH, AbundIn(99)
 
     CHARACTER(1024), ALLOCATABLE :: TmpFiles(:)
     CHARACTER(64), ALLOCATABLE :: TmpCodes(:)
@@ -46,6 +46,9 @@ MODULE IOUtils
     GotModel = .FALSE.
     GotNext = .FALSE.
     NextLine = ''
+
+    ! Initial isotopic fractions
+    CALL InitIsotFrac
 
     ! Initial allocation for line lists
     NfilesAlloc = 16
@@ -82,7 +85,7 @@ MODULE IOUtils
         CALL ReplaceCommas(Val)
         READ(Val, *, IOSTAT=Ios) Wstart, Wend, Dstep, Wmode
         IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse wave values from: ' // TRIM(Val), Inpfile)
-        IF (Wstart >= Wend) CALL ErrStop('ReadInputFile: incorrect WSTART or WEND', Inpfile)
+        IF (Wstart <= 0 .OR. Wstart >= Wend) CALL ErrStop('ReadInputFile: incorrect WSTART or WEND', Inpfile)
         IF (Dstep <= 0) CALL ErrStop('ReadInputFile: incorrect DSTEP', Inpfile)
         IF (Wmode /= 0 .AND. Wmode /= 1) CALL ErrStop('ReadInputFile: incorrect WMODE', Inpfile)
         GotWave = .TRUE.
@@ -158,7 +161,6 @@ MODULE IOUtils
           ! Check if this is a new keyword or empty line
           CALL ParseKeyValue(Line, Key, Val, HasEqual)
           IF (HasEqual .AND. LEN_TRIM(Key) > 0) THEN
-            ! New keyword found - buffer it and exit loop
             NextLine = Line
             GotNext = .TRUE.
             EXIT
@@ -192,18 +194,36 @@ MODULE IOUtils
       ! Element abundances; need to read model to initialize Abund array
       CASE ('ABUNDANCE')
         IF (.NOT. GotModel) CALL ErrStop('ReadInputFile: MODEL must be specified before ABUNDANCE', Inpfile)
-        CALL ReadAbund(Inpfile, Val, Abund, NextLine, GotNext)
+        AbundIn = 0d0
+        GivenIn = .FALSE.
+        CALL ReadAbund(Inpfile, Val, AbundIn, NextLine, GotNext, GivenIn)
+        DO i = 1, 99
+          IF (GivenIn(i)) Abund(i,:) = AbundIn(i)
+        END DO
 
-      ! Read [M/H]; this replaces abundances from model atmosphere header by built-in solar or scaled-solar table
+      ! Prefix of the output file names, replacing the default 'fs'
+      CASE ('PREFIX')
+        OutPrefix = StripQuotes(Val)
+        IF (LEN_TRIM(OutPrefix) == 0) CALL ErrStop('ReadInputFile: PREFIX requires a non-empty value', Inpfile)
+
+      ! Isotopic fractions replacing the reference values; may appear anywhere in the file
+      CASE ('ISOTOPE')
+        CALL ReadIsot(Inpfile, Val, NextLine, GotNext)
+
+      ! Read [M/H]; this replaces the abundances by built-in solar or scaled-solar table
       CASE ('[M/H]')
         IF (.NOT. GotModel) CALL ErrStop('ReadInputFile: MODEL must be specified before [M/H]', Inpfile)
         READ(Val, *, IOSTAT=Ios) MH
         IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse MH parameter from: ' // TRIM(Val), Inpfile)
-        Abund = SolAbn
-        Abund(3:99) = Abund(3:99) + MH
+        AbundIn = SolAbn
+        AbundIn(3:99) = AbundIn(3:99) + MH
+        Abund = SPREAD(AbundIn, 2, Ntau)
         
       ! Limb angles: either integer count or explicit list of mu values
       CASE ('MUS')
+
+        ! Reset the mu permutation
+        IF (ALLOCATED(MuPerm)) DEALLOCATE(MuPerm)
         CALL ReplaceCommas(Val)
         IF (INDEX(Val, '.') > 0) THEN
         
@@ -238,7 +258,6 @@ MODULE IOUtils
               CALL ErrStop('ReadInputFile: explicit MUS values must satisfy 0 < mu <= 1', Inpfile)
 
             ! Sort mu angles in standard (descending) order, recording the permutation
-            IF (ALLOCATED(MuPerm)) DEALLOCATE(MuPerm)
             ALLOCATE(MuPerm(Nmu))
             MuPerm = [(i, i = 1, Nmu)]
             DO i = 1, Nmu - 1
@@ -323,18 +342,6 @@ MODULE IOUtils
         IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse VWmol parameter from: ' // TRIM(Val), Inpfile)
         IF (VWmol > 10) CALL ErrStop('ReadInputFile: VWmol > 10 (ABO sigma.alpha) is not supported', Inpfile)
         IF (VWmol < 0) VWmol = 10d0**VWmol
-
-      ! Change BfKurucz
-      CASE ('BFKURUCZ')
-        READ(Val, *, IOSTAT=Ios) BfKurF
-        IF (Ios /= 0) CALL ErrStop('ReadInputFile: could not parse BfKurucz flag from: ' // TRIM(Val), Inpfile)
-        IF (BfKurF == 1) THEN
-          BfKurucz = .TRUE.
-        ELSE IF (BfKurF == 0) THEN
-          BfKurucz = .FALSE.
-        ELSE
-          CALL ErrStop('ReadInputFile: unknown BfKurucz flag in: ' // TRIM(Val), Inpfile)
-        END IF
 
       ! Precomputed line opacity file to add to the calculated line opacity
       CASE ('OPACITY')
@@ -428,13 +435,27 @@ MODULE IOUtils
     END IF
 
     ! Copy line list data to module arrays
-    ALLOCATE(LineListFiles(Nfiles), LineListType(Nfiles), MolCodeStd(Nfiles))
+    ALLOCATE(LineListFiles(Nfiles), LineListType(Nfiles), MolCodeStd(Nfiles), GfScale(Nfiles))
     DO i = 1, Nfiles
       LineListFiles(i) = TmpFiles(i)
       MolCodeStd(i) = TmpCodes(i)
       LineListType(i) = TmpTypes(i)
+
+      ! gf factor of a non-molecular list: optional number after '-', 0 <= factor <= 1
+      GfScale(i) = 1d0
+      IF (TmpTypes(i) == 0 .AND. LEN_TRIM(TmpCodes(i)) > 1) THEN
+        IF (VERIFY(TRIM(TmpCodes(i)(2:)), '0123456789.') /= 0) &
+          CALL ErrStop('ReadInputFile: invalid gf factor in line list code ' // TRIM(TmpCodes(i)))
+        READ(TmpCodes(i)(2:), *, IOSTAT=Ios) GfScale(i)
+        IF (Ios /= 0) CALL ErrStop('ReadInputFile: invalid gf factor in line list code ' // TRIM(TmpCodes(i)))
+        IF (GfScale(i) < 0d0 .OR. GfScale(i) > 1d0) &
+          CALL ErrStop('ReadInputFile: gf factor in line list code outside [0,1]: ' // TRIM(TmpCodes(i)))
+      END IF
     END DO
     DEALLOCATE(TmpFiles, TmpCodes, TmpTypes)
+
+    ! Full output file names
+    OutputFiles = TRIM(OutPrefix) // OutputFiles
 
   END SUBROUTINE ReadInputFile
 
@@ -486,6 +507,7 @@ MODULE IOUtils
 
     Code = ADJUSTL(Trimmed(1:j-1))
     FilePath = ADJUSTL(Trimmed(j:))
+    IF (LEN_TRIM(FilePath) == 0) Ios = 1
 
     IF (Code(1:1) == '-') THEN
       FileType = 0  ! mixed atomic HDF5 line list from VALD or *.z mixed atomic molecular line list
@@ -497,7 +519,7 @@ MODULE IOUtils
   ! Read a FastSpec line list in HDF5 format. Supports single-species molecular lists,
   ! multi-species atomic line list, and magnetic multi-species atomic line list
   SUBROUTINE ReadHDF(File, ReadFull, MolName, MolIon, MolCode, &
-                     Natom, Eluniq, Iouniq, Idxmap, Mag)
+                     Natom, Eluniq, Iouniq, Idxmap, Mag, Mol)
 
     USE LineData
     USE hdf5
@@ -510,7 +532,7 @@ MODULE IOUtils
     INTEGER,       INTENT(OUT), OPTIONAL :: Natom
     CHARACTER(*),  POINTER,     OPTIONAL :: Eluniq(:)
     INTEGER,       POINTER,     OPTIONAL :: Iouniq(:), Idxmap(:)
-    LOGICAL,       INTENT(OUT), OPTIONAL :: Mag
+    LOGICAL,       INTENT(OUT), OPTIONAL :: Mag, Mol
 
     ! HDF5 handles
     INTEGER(HID_T) :: Fid, Gid, Attr, Memstr, Dcol, Dspace, Memspace
@@ -521,14 +543,14 @@ MODULE IOUtils
 
     ! Working variables and buffers
     INTEGER :: Ierr, Wl_vac
-    LOGICAL :: Exists, HasEL, IsMol, IsMag, HasCol
-    INTEGER :: N, I1, I2, i, k, NatomL, Npi, Nsig
+    LOGICAL :: Exists, HasEL, IsMol, IsMag, HasCol, HasIsot
+    INTEGER :: N, I1, I2, i, k, NatomL, Npi, Nsig, iz
     INTEGER, POINTER :: Uidx(:), IdxmapL(:)
     INTEGER, PARAMETER :: Name_len = 8
-    INTEGER, ALLOCATABLE :: idx(:), Ionsel(:)
+    INTEGER, ALLOCATABLE :: idx(:), Ionsel(:), Isotsel(:)
     REAL(8) :: Wmin, Wmax
     REAL(8), ALLOCATABLE :: W(:), Wsel(:)
-    REAL(4), ALLOCATABLE :: Esel(:), Lggfsel(:), Gradsel(:), Gqstsel(:), Gvdwsel(:), Gusel(:)
+    REAL(4), ALLOCATABLE :: Esel(:), Lggfsel(:), Gradsel(:), Gqstsel(:), Gvdwsel(:), Gfiso(:)
     REAL(4), ALLOCATABLE :: Jlosel(:), Jupsel(:), Glosel(:), Gupsel(:)
     REAL(4), ALLOCATABLE :: Spi(:), Rpi(:), Ssig(:), Rsig(:)
     CHARACTER(Name_len) :: Name
@@ -594,6 +616,7 @@ MODULE IOUtils
       END IF
     END IF
     IF (PRESENT(Mag)) Mag = IsMag
+    IF (PRESENT(Mol)) Mol = IsMol
 
     ! Attribute dataspace is scalar
     Adims(1) = 1_HSIZE_T
@@ -676,12 +699,9 @@ MODULE IOUtils
     CALL h5aclose_f(Attr, Ierr)
 
     ! Convert the range to the calculation frame before the overlap test
-    IF (Wl_vac == 1 .AND. .NOT. Wvac) THEN
+    IF (Wl_vac == 1) THEN
       Wmin = Vac2Air(Wmin)
       Wmax = Vac2Air(Wmax)
-    ELSE IF (Wl_vac == 0 .AND. Wvac) THEN
-      Wmin = Air2Vac(Wmin)
-      Wmax = Air2Vac(Wmax)
     END IF
 
     IF (Wmax < Wstart .OR. Wmin > Wend) THEN
@@ -714,12 +734,8 @@ MODULE IOUtils
     CALL h5sclose_f(Dspace, Ierr)
     CALL h5dclose_f(Dcol, Ierr)
 
-    ! Convert wavelengths between air and vacuum per WL_VAC and the Wvac setting
-    IF (Wl_vac == 1 .AND. .NOT. Wvac) THEN      ! vac in file; calculations in air
-      W = Vac2Air(W)
-    ELSE IF (Wl_vac == 0 .AND. Wvac) THEN       ! air in file; calculations in vacuum
-      W = Air2Vac(W)
-    END IF
+    ! Convert vacuum wavelengths to air
+    IF (Wl_vac == 1) W = Vac2Air(W)
 
     ! Check that wavelength array is sorted. 
     ! This will intentionally fail for WL_vac -> air at ~2000 A
@@ -765,12 +781,11 @@ MODULE IOUtils
 
     IF (IsMol) THEN
 
-      ! Molecular line data: E, LGGF, GU, GRAD -> LinesM
-      ALLOCATE(Esel(Nlines), Lggfsel(Nlines), Gusel(Nlines), Gradsel(Nlines), STAT=Ierr)
+      ! Molecular line data: E, LGGF, GRAD -> LinesM
+      ALLOCATE(Esel(Nlines), Lggfsel(Nlines), Gradsel(Nlines), STAT=Ierr)
       IF (Ierr /= 0) STOP 'ReadHDF: allocation failed (subset numeric)'
       CALL ReadColR4('E', Esel)
       CALL ReadColR4('LGGF', Lggfsel)
-      CALL ReadColR4('GU', Gusel)
       CALL ReadColR4('GRAD', Gradsel)
       CALL h5sclose_f(Memspace, Ierr)
       CALL h5gclose_f(Gid, Ierr)
@@ -787,7 +802,6 @@ MODULE IOUtils
         LinesM(i)%Wl   = Wsel(i)
         LinesM(i)%Elo  = Esel(i)
         LinesM(i)%Gf   = Lggfsel(i)
-        LinesM(i)%Gu   = Gusel(i)
         LinesM(i)%Grad = Gradsel(i)
       END DO
       LinesM%gf = 10.0**LinesM%gf
@@ -795,7 +809,6 @@ MODULE IOUtils
       IF (ALLOCATED(Wsel))    DEALLOCATE(Wsel)
       IF (ALLOCATED(Esel))    DEALLOCATE(Esel)
       IF (ALLOCATED(Lggfsel)) DEALLOCATE(Lggfsel)
-      IF (ALLOCATED(Gusel))   DEALLOCATE(Gusel)
       IF (ALLOCATED(Gradsel)) DEALLOCATE(Gradsel)
       CALL h5fclose_f(Fid, Ierr)
       CALL h5eset_auto_f(1, Ierr)
@@ -839,7 +852,7 @@ MODULE IOUtils
         IF (NatomL <= 0) STOP 'ReadHDF: failed deriving unique list of species'
         IF (PRESENT(Natom)) Natom = NatomL
 
-        ! Only Natom requested (not used in the current code)
+        ! Count-only request
         IF (.NOT. PRESENT(Eluniq) .AND. .NOT. PRESENT(Iouniq) .AND. .NOT. PRESENT(Idxmap)) THEN
           IF (ASSOCIATED(Uidx)) DEALLOCATE(Uidx)
           IF (ASSOCIATED(IdxmapL)) DEALLOCATE(IdxmapL)
@@ -886,6 +899,16 @@ MODULE IOUtils
         CALL ReadColR4('GLO', Glosel)
         CALL ReadColR4('GUP', Gupsel)
       END IF
+
+      ! Optional isotope mass number of every line (0 = not given); present when the
+      ! log gf values are not scaled by the isotopic fractions
+      CALL h5lexists_f(Gid, 'ISOT', HasIsot, Ierr)
+      IF (Ierr /= 0) HasIsot = .FALSE.
+      IF (HasIsot) THEN
+        ALLOCATE(Isotsel(Nlines), STAT=Ierr)
+        IF (Ierr /= 0) STOP 'ReadHDF: allocation failed (ISOT)'
+        CALL ReadColInt('ISOT', Isotsel)
+      END IF
       CALL h5sclose_f(Memspace, Ierr)
       CALL h5gclose_f(Gid, Ierr)
 
@@ -905,6 +928,30 @@ MODULE IOUtils
         Jupsel = Jupsel(idx)
         Glosel = Glosel(idx)
         Gupsel = Gupsel(idx)
+      END IF
+
+      ! Isotopic fraction for every line with a given isotope, 1 for the other lines
+      IF (HasIsot) THEN
+        Isotsel = Isotsel(idx)
+        ALLOCATE(Gfiso(Nlines), STAT=Ierr)
+        IF (Ierr /= 0) STOP 'ReadHDF: allocation failed (isotopic fractions)'
+        Gfiso = 1.0
+        DO i = 1, Nlines
+          IF (Isotsel(i) <= 0) CYCLE
+          iz = FINDLOC(Elemen, ADJUSTL(Elsel(i)), 1)
+          IF (iz == 0 .OR. Isotsel(i) > SIZE(IsotFrac, 2)) THEN
+            WRITE(Msg, '(A, I0, A)') 'ReadHDF: invalid isotope ', Isotsel(i), &
+              TRIM(ADJUSTL(Elsel(i))) // ' in the ISOT column of ' // TRIM(ADJUSTL(File))
+            CALL ErrStop(Msg)
+          END IF
+          IF (.NOT. ANY(IsoRefZ == iz .AND. IsoRefA == Isotsel(i))) THEN
+            WRITE(Msg, '(A, I0, A)') 'ReadHDF: isotope ', Isotsel(i), &
+              TRIM(ADJUSTL(Elsel(i))) // ' in the ISOT column of ' // TRIM(ADJUSTL(File)) // &
+              ' is not in the isotopic table'
+            CALL ErrStop(Msg)
+          END IF
+          Gfiso(i) = REAL(IsotFrac(iz, Isotsel(i)), 4)
+        END DO
       END IF
 
       IF (IsMag) THEN
@@ -980,6 +1027,9 @@ MODULE IOUtils
           END IF
         END DO
 
+        ! Scale gf of lines with a given isotope by its isotopic fraction
+        IF (HasIsot) LinesZ%Gf = LinesZ%Gf * Gfiso
+
         IF (ALLOCATED(Jlosel)) DEALLOCATE(Jlosel)
         IF (ALLOCATED(Jupsel)) DEALLOCATE(Jupsel)
         IF (ALLOCATED(Glosel)) DEALLOCATE(Glosel)
@@ -1020,8 +1070,13 @@ MODULE IOUtils
           END IF
         END DO
 
+        ! Scale gf of lines with a given isotope by its isotopic fraction
+        IF (HasIsot) LinesA%Gf = LinesA%Gf * Gfiso
+
       END IF
 
+      IF (ALLOCATED(Isotsel)) DEALLOCATE(Isotsel)
+      IF (ALLOCATED(Gfiso))   DEALLOCATE(Gfiso)
       IF (ALLOCATED(Elsel))   DEALLOCATE(Elsel)
       IF (ALLOCATED(Ionsel))  DEALLOCATE(Ionsel)
       IF (ALLOCATED(Wsel))    DEALLOCATE(Wsel)
@@ -1141,7 +1196,7 @@ MODULE IOUtils
 
     ! Working variables
     INTEGER :: Unit, Ios, Nall, Krec, m, NskipH, i, j, k, Npi, Nsi, NatomL
-    LOGICAL :: Exists, FullMode, SkipH, EnergyInCm, HasEv, HasCm
+    LOGICAL :: Exists, FullMode, SkipH, EnergyInCm, HasEv, HasCm, LongFmt
     CHARACTER(1024) :: Line, Msg
     CHARACTER(16) :: Elraw
     CHARACTER(Elen) :: El
@@ -1179,19 +1234,28 @@ MODULE IOUtils
       CALL ErrStop('ReadAscMag: cannot read line count from header of ' // TRIM(ADJUSTL(File)))
 
     ! Determine units for excitation energy: eV (stored as read) or cm^-1 (converted to eV for every line).
+    ! The same two header lines identify a VALD long-format file (E_low and J of both levels)
     HasEv = .FALSE.
     HasCm = .FALSE.
+    LongFmt = .FALSE.
     READ(Unit, '(A)', IOSTAT=Ios) Line
     IF (Ios == 0) THEN
       Line = UpperCase(Line)
       IF (INDEX(Line, 'CM^-1') > 0) HasCm = .TRUE.
       IF (INDEX(Line, '(EV)')  > 0) HasEv = .TRUE.
+      IF (INDEX(Line, 'E_LOW') > 0 .OR. INDEX(Line, 'J LO') > 0) LongFmt = .TRUE.
       READ(Unit, '(A)', IOSTAT=Ios) Line
     END IF
     IF (Ios /= 0) CALL ErrStop('ReadAscMag: unexpected EOF after header in ' // TRIM(ADJUSTL(File)))
     Line = UpperCase(Line)
     IF (INDEX(Line, 'CM^-1') > 0) HasCm = .TRUE.
     IF (INDEX(Line, '(EV)')  > 0) HasEv = .TRUE.
+    IF (INDEX(Line, 'E_LOW') > 0 .OR. INDEX(Line, 'J LO') > 0) LongFmt = .TRUE.
+
+    ! A long-format record would be read with its fields in the wrong order
+    IF (LongFmt) CALL ErrStop('ReadAscMag: VALD long format in ' // &
+      TRIM(ADJUSTL(File)) // ' is not supported')
+
     IF (HasCm) THEN
       EnergyInCm = .TRUE.
     ELSE IF (HasEv) THEN
@@ -1245,9 +1309,6 @@ MODULE IOUtils
       ELSE
         m = m + 1
       END IF
-
-      ! .z wavelengths are assumed to be in air; convert if computing in vacuum
-      IF (Wvac) Wl = Air2Vac(Wl)
 
       ! Zeeman pattern. A Lande factor < -10 signals an explicit pi/sigma block,
       ! stored as two physical lines each (count+shifts, then strengths).
@@ -1504,7 +1565,7 @@ MODULE IOUtils
   SUBROUTINE ReadHeader(Line, Teff, Logg, Motype, Wlstd)
 
     CHARACTER(*), INTENT(IN) :: Line
-    REAL, INTENT(OUT) :: Teff, Logg
+    REAL(4), INTENT(OUT) :: Teff, Logg
     INTEGER, INTENT(OUT) :: Motype
     REAL(8), INTENT(OUT) :: Wlstd
     INTEGER :: i, i1, l
@@ -1538,12 +1599,15 @@ MODULE IOUtils
 
   END SUBROUTINE ReadHeader
 
-  ! Reads a model atmosphere: header, control flags, abundances, and layers
+  ! Reads a model atmosphere: header, control flags, abundances, and layers. A layer line may
+  ! end with depth-dependent abundances 'El: value', 'El: value', ..., which replace the header 
+  ! abundances of these elements in this layer
   SUBROUTINE ReadModel
 
     INTEGER :: i, j, Ios
-    REAL(8) :: grd1, grd2
+    REAL(8) :: grd1, grd2, AbundHdr(99)
     CHARACTER(1024) :: Line, Msg
+    CHARACTER(8192) :: Layer
 
     ! Reset plane-parallel/spherical geometry indicator
     Radius = -1d0
@@ -1578,10 +1642,7 @@ MODULE IOUtils
     READ(Atmfile, *, END=5, ERR=6) OpFlags
 
     ! Read abundances and the number of depth points
-    READ(Atmfile, *, END=5, ERR=6) Abund, Ntau
-
-    ! Keep the model atmosphere abundances for the optional hydrostatic structure correction
-    AbundModel = Abund
+    READ(Atmfile, *, END=5, ERR=6) AbundHdr, Ntau
 
     ! Validate the number of model layers
     IF (Ntau < 3) THEN
@@ -1593,14 +1654,49 @@ MODULE IOUtils
     IF (ALLOCATED(Atmos)) DEALLOCATE(Atmos)
     ALLOCATE(Atmos(Ntau))
 
+    ! Every layer starts with the header abundances
+    IF (ALLOCATED(Abund)) DEALLOCATE(Abund)
+    ALLOCATE(Abund(99,Ntau))
+    Abund = SPREAD(AbundHdr, 2, Ntau)
+
     ! Read the model layer by layer; spherical models carry a 6th column with the
     ! height above the reference radius (cm)
     DO j = 1, Ntau
-      IF (Radius > 0d0) THEN
-        READ(Atmfile, *, END=5, ERR=6) Atmos(j)%Rhox, Atmos(j)%T, Atmos(j)%Xne, Atmos(j)%Xna, &
-                                       Atmos(j)%Rho, Atmos(j)%Height
+
+      ! Look for depth-dependent abundances, which start with the first quote of the line
+      CALL ReadLine(Atmfile, Layer, Ios)
+      IF (Ios < 0) GO TO 5
+      IF (Ios > 0) GO TO 6
+      IF (LEN_TRIM(Layer) == LEN(Layer)) THEN
+        WRITE(Msg, '(A, I0, A)') 'ReadModel: layer ', j, ' is too long in ' // TRIM(AtmosFile)
+        CALL ErrStop(Msg)
+      END IF
+      i = INDEX(Layer, '''')
+
+      ! Without abundances read the layer as before, which lets its values continue on the
+      ! next line; otherwise read the values before the first quote
+      IF (i == 0) THEN
+        BACKSPACE(Atmfile)
+        IF (Radius > 0d0) THEN
+          READ(Atmfile, *, END=5, ERR=6) Atmos(j)%Rhox, Atmos(j)%T, Atmos(j)%Xne, Atmos(j)%Xna, &
+                                         Atmos(j)%Rho, Atmos(j)%Height
+        ELSE
+          READ(Atmfile, *, END=5, ERR=6) Atmos(j)%Rhox, Atmos(j)%T, Atmos(j)%Xne, Atmos(j)%Xna, Atmos(j)%Rho
+        END IF
       ELSE
-        READ(Atmfile, *, END=5, ERR=6) Atmos(j)%Rhox, Atmos(j)%T, Atmos(j)%Xne, Atmos(j)%Xna, Atmos(j)%Rho
+        IF (Radius > 0d0) THEN
+          READ(Layer(1:i-1), *, IOSTAT=Ios) Atmos(j)%Rhox, Atmos(j)%T, Atmos(j)%Xne, Atmos(j)%Xna, &
+                                            Atmos(j)%Rho, Atmos(j)%Height
+        ELSE
+          READ(Layer(1:i-1), *, IOSTAT=Ios) Atmos(j)%Rhox, Atmos(j)%T, Atmos(j)%Xne, Atmos(j)%Xna, Atmos(j)%Rho
+        END IF
+        IF (Ios /= 0) THEN
+          WRITE(Msg, '(A, I0, A)') 'ReadModel: cannot read layer ', j, ' of ' // TRIM(AtmosFile)
+          CALL ErrStop(Msg)
+        END IF
+
+        ! Depth-dependent abundances of this layer
+        CALL ParseAbund(Layer(i:), Abund(:,j))
       END IF
     END DO
 
@@ -1623,9 +1719,13 @@ MODULE IOUtils
     IF (ABS(grd1) > 5.0 * ABS(grd2)) THEN
       WRITE(*,*) 'First model atmosphere layer will be ignored'
       Atmos = Atmos(2:Ntau)
+      Abund = Abund(:,2:Ntau)
       Ntau = SIZE(Atmos)
     END IF
-    
+
+    ! Keep the model atmosphere abundances for the optional hydrostatic structure correction
+    AbundModel = Abund
+
     ! Go back to caller
     RETURN
 
@@ -1713,12 +1813,7 @@ MODULE IOUtils
 
   END SUBROUTINE WriteOut
 
-  ! Write binary file with the line strength list of the current line list: species name,
-  ! ion, central wavelength and residual central line intensity of every retained line. 
-  ! One block is written per line list, consisting of the record count Nrec (int32) 
-  ! followed by the species names (Nrec x char*8), ions (Nrec x int32), central wavelengths 
-  ! (Nrec x real64) and residual intensities (Nrec x real32). The first call replaces any 
-  ! old file; calls for subsequent line lists append their blocks.
+  ! Write binary file with the line strength list of the current line list
   SUBROUTINE WriteLinStr
 
     USE LineData

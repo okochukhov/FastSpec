@@ -6,15 +6,28 @@
 ! utils.f90: general-purpose utility routines - timing and time formatting, string
 ! manipulation and keyword parsing, error termination, abundance table handling, species
 ! name and ionisation stage parsing, vacuum-to-air wavelength conversion, isotopic
-! fractions of molecular species, Zeeman splitting pattern calculation, limb-angle
-! quadratures and annulus areas for disk integration.
+! fraction table and isotopic fractions of molecular species, Zeeman splitting pattern
+! calculation, limb-angle quadratures and annulus areas for disk integration, progress labels
+! on a terminal.
 !
 ! =============================================================================================
 
 ! General utility routines
 MODULE Utils
   USE Constants, ONLY: Pi
+  USE, INTRINSIC :: ISO_C_BINDING, ONLY: C_INT
   IMPLICIT NONE
+
+  ! Length of the progress labels shown on the terminal
+  INTEGER, PRIVATE :: ProgLen = 0
+
+  ! POSIX isatty
+  INTERFACE
+    INTEGER(C_INT) FUNCTION CIsatty(Fd) BIND(C, NAME='isatty')
+      IMPORT :: C_INT
+      INTEGER(C_INT), VALUE :: Fd
+    END FUNCTION CIsatty
+  END INTERFACE
 
 CONTAINS
 
@@ -30,9 +43,25 @@ CONTAINS
          values(5), values(6), values(7)     ! hour, minute, second
   END FUNCTION CurrentTime
 
+  ! Write a progress label, only on a terminal
+  SUBROUTINE ProgressShow(Msg)
+    CHARACTER(*), INTENT(IN) :: Msg
+
+    IF (CIsatty(1_C_INT) == 0) RETURN
+    WRITE(*, '(A)', ADVANCE='NO') Msg
+    ProgLen = ProgLen + LEN(Msg)
+  END SUBROUTINE ProgressShow
+
+  ! Erase the progress labels
+  SUBROUTINE ProgressClear
+    IF (ProgLen == 0) RETURN
+    WRITE(*, '(A)', ADVANCE='NO') REPEAT(ACHAR(8), ProgLen) // REPEAT(' ', ProgLen) // REPEAT(ACHAR(8), ProgLen)
+    ProgLen = 0
+  END SUBROUTINE ProgressClear
+
   ! Equivalent of Intel's Dtime function; using SYSTEM_CLOCK
-  REAL FUNCTION MDtime(tarray, in_count) RESULT(elapsed)
-    REAL, INTENT(OUT) :: tarray(2)
+  REAL(4) FUNCTION MDtime(tarray, in_count) RESULT(elapsed)
+    REAL(4), INTENT(OUT) :: tarray(2)
     INTEGER, OPTIONAL, INTENT(INOUT) :: in_count
     INTEGER :: count, rate, count_max
     INTEGER, SAVE :: last_count
@@ -61,29 +90,9 @@ CONTAINS
     IF (PRESENT(in_count)) in_count = last_count
   END FUNCTION MDtime
 
-  ! Equivalent of Intel's Dtime function; using CPU_time
-  REAL FUNCTION MDtime1(tarray) RESULT(elapsed)
-    REAL, INTENT(out) :: tarray(2)
-    REAL :: now, last_time
-    SAVE :: last_time
-    DATA last_time / -1.0 /
-
-    CALL CPU_time(now)
-
-    IF (last_time < 0.0) THEN
-      elapsed = 0.0
-    ELSE
-      elapsed = now - last_time
-    END IF
-
-    tarray(1) = elapsed
-    tarray(2) = 0.0
-    last_time = now
-  END FUNCTION MDtime1
-
   ! Conversion of seconds to time in HH:MM:SS.S format, rounded to 0.1 s
   FUNCTION sec2time(secnds) result(stime)
-    REAL, INTENT(in) :: secnds
+    REAL(4), INTENT(in) :: secnds
     CHARACTER(10) :: stime
     INTEGER :: it
 
@@ -237,6 +246,9 @@ CONTAINS
     IF (LEN_TRIM(Trimmed) == 0) RETURN
     IF (Trimmed(1:1) == '#' .OR. Trimmed(1:1) == '!') RETURN
 
+    ! Strip an inline comment
+    CALL StripInlineComment(Trimmed)
+
     ! Find '=' position
     p = INDEX(Trimmed, '=')
     IF (p > 0) THEN
@@ -248,9 +260,6 @@ CONTAINS
       Key = ''
       Value = ADJUSTL(Trimmed)
     END IF
-
-    ! Strip inline comments from Value (find first ! or # not inside quotes)
-    CALL StripInlineComment(Value)
 
   END SUBROUTINE ParseKeyValue
 
@@ -330,18 +339,19 @@ CONTAINS
   ! quotes are optional and the entries are separated by commas and/or spaces, e.g.
   !   abundance='Fe: -4.54', 'Cr:-5.00'   or   abundance=Fe:-4.54, Cr:-5.00
   ! Reads until an empty data line or 'END' or next keyword is encountered
-  ! FirstValue contains any values on the same line as 'abundance='
-  SUBROUTINE ReadAbund(File, FirstValue, Abund, NextLine, GotNext)
+  ! FirstValue contains any values on the same line as 'abundance='; Given marks the elements
+  ! whose abundances were read
+  SUBROUTINE ReadAbund(File, FirstValue, Abund, NextLine, GotNext, Given)
     INTEGER, INTENT(IN) :: File
     CHARACTER(*), INTENT(IN) :: FirstValue
     REAL(8), INTENT(INOUT) :: Abund(:)
     CHARACTER(*), INTENT(OUT) :: NextLine
     LOGICAL, INTENT(OUT) :: GotNext
+    LOGICAL, INTENT(INOUT) :: Given(:)
 
-    INTEGER :: i, i1, i2, n, Iabn, Ios
-    CHARACTER(32) :: Elstr
-    CHARACTER(1024) :: Str1, Str2, Key, Val
-    LOGICAL :: HasEq, FirstLine, HasColon
+    INTEGER :: Ios
+    CHARACTER(1024) :: Str1, Key, Val
+    LOGICAL :: HasEq, FirstLine, GotEnd
 
     NextLine = ''
     GotNext = .FALSE.
@@ -378,61 +388,86 @@ CONTAINS
       ! Strip inline comments
       CALL StripInlineComment(Str1)
 
-      ! Remove spaces and convert to upper case
-      Str2 = UpperCase(RemoveChar(Str1, ' '))
-      n = LEN_TRIM(Str2)
-
-      ! Turn the quotes of the legacy format into commas: this makes the quoting
-      ! optional and separates quoted entries written without a comma between them
-      DO i = 1, n
-        IF (Str2(i:i) == '''') Str2(i:i) = ','
-      END DO
-
-      ! Parse all abundance entries on this line
-      i1 = 1
-      DO WHILE (i1 <= n)
-
-        ! Skip the commas separating the entries
-        IF (Str2(i1:i1) == ',') THEN
-          i1 = i1 + 1
-          CYCLE
-        END IF
-
-        ! Locate the colon of this entry: the element name is one or two characters
-        i2 = i1
-        IF (i1 + 1 <= n) THEN
-          IF (Str2(i1+1:i1+1) == ':') i2 = i1 + 1
-        END IF
-        IF (i2 == i1 .AND. i1 + 2 <= n) THEN
-          IF (Str2(i1+2:i1+2) == ':') i2 = i1 + 2
-        END IF
-
-        ! The entry ends at the next comma or at the start of the next element
-        ! name; the search starts past the colon, so that the second letter of
-        ! this element name is not taken for the start of the next entry. An
-        ! entry without a colon is extended to the next comma instead, so that
-        ! malformed text is reported in full rather than split into fragments
-        HasColon = i2 > i1
-        DO WHILE (i2 < n)
-          IF (Str2(i2+1:i2+1) == ',') EXIT
-          IF (HasColon .AND. IsElName(Str2, i2+1, n)) EXIT
-          i2 = i2 + 1
-        END DO
-
-        ! Extract the entry, guarding against a runaway malformed one
-        IF (i2 - i1 + 1 > LEN(Elstr)) &
-          CALL ErrStop('ReadAbund: abundance entry is too long: ' // Str2(i1:i2))
-        Elstr = Str2(i1:i2)
-
-        ! Skip if 'END' is encountered (for compatibility)
-        IF (TRIM(Elstr) == 'END') RETURN
-
-        ! Get and store abundance for this element
-        CALL Getabn(Elstr, Abund, Iabn)
-        i1 = i2 + 1
-      END DO
+      ! Parse all abundance entries on this line; stop at 'END'
+      CALL ParseAbund(Str1, Abund, Given, GotEnd)
+      IF (GotEnd) RETURN
     END DO
   END SUBROUTINE ReadAbund
+
+  ! Parse a string of abundance entries 'El: value', 'El: value', ... (quotes optional, entries
+  ! separated by commas and/or spaces), storing the values in Abund and optionally marking the
+  ! elements in Given. The entry 'END' ends the parsing and sets the optional GotEnd
+  SUBROUTINE ParseAbund(Str, Abund, Given, GotEnd)
+    CHARACTER(*), INTENT(IN) :: Str
+    REAL(8), INTENT(INOUT) :: Abund(:)
+    LOGICAL, OPTIONAL, INTENT(INOUT) :: Given(:)
+    LOGICAL, OPTIONAL, INTENT(OUT) :: GotEnd
+
+    INTEGER :: i, i1, i2, n, Iabn
+    CHARACTER(32) :: Elstr
+    CHARACTER(LEN(Str)) :: Str2
+    LOGICAL :: HasColon
+
+    IF (PRESENT(GotEnd)) GotEnd = .FALSE.
+
+    ! Remove spaces and convert to upper case
+    Str2 = UpperCase(RemoveChar(Str, ' '))
+    n = LEN_TRIM(Str2)
+
+    ! Turn the quotes of the legacy format into commas: this makes the quoting
+    ! optional and separates quoted entries written without a comma between them
+    DO i = 1, n
+      IF (Str2(i:i) == '''') Str2(i:i) = ','
+    END DO
+
+    ! Parse all abundance entries of the string
+    i1 = 1
+    DO WHILE (i1 <= n)
+
+      ! Skip the commas separating the entries
+      IF (Str2(i1:i1) == ',') THEN
+        i1 = i1 + 1
+        CYCLE
+      END IF
+
+      ! Locate the colon of this entry: the element name is one or two characters
+      i2 = i1
+      IF (i1 + 1 <= n) THEN
+        IF (Str2(i1+1:i1+1) == ':') i2 = i1 + 1
+      END IF
+      IF (i2 == i1 .AND. i1 + 2 <= n) THEN
+        IF (Str2(i1+2:i1+2) == ':') i2 = i1 + 2
+      END IF
+
+      ! The entry ends at the next comma or at the start of the next element
+      ! name; the search starts past the colon, so that the second letter of
+      ! this element name is not taken for the start of the next entry. An
+      ! entry without a colon is extended to the next comma instead, so that
+      ! malformed text is reported in full rather than split into fragments
+      HasColon = i2 > i1
+      DO WHILE (i2 < n)
+        IF (Str2(i2+1:i2+1) == ',') EXIT
+        IF (HasColon .AND. IsElName(Str2, i2+1, n)) EXIT
+        i2 = i2 + 1
+      END DO
+
+      ! Extract the entry, guarding against a runaway malformed one
+      IF (i2 - i1 + 1 > LEN(Elstr)) &
+        CALL ErrStop('ParseAbund: abundance entry is too long: ' // Str2(i1:i2))
+      Elstr = Str2(i1:i2)
+
+      ! Stop if 'END' is encountered (for compatibility)
+      IF (TRIM(Elstr) == 'END') THEN
+        IF (PRESENT(GotEnd)) GotEnd = .TRUE.
+        RETURN
+      END IF
+
+      ! Get and store abundance for this element
+      CALL Getabn(Elstr, Abund, Iabn)
+      IF (PRESENT(Given)) Given(Iabn) = .TRUE.
+      i1 = i2 + 1
+    END DO
+  END SUBROUTINE ParseAbund
 
   ! Parse "Element_name:Abundance" string and updates ABUND
   SUBROUTINE Getabn(Elname, Abund, Iabn)
@@ -480,6 +515,156 @@ CONTAINS
     ! No matching element was found
     CALL ErrStop('Getabn: Error in the element name: ' // Elname)
   END SUBROUTINE Getabn
+
+  ! Read isotopic fractions as: 'AEl: fraction', 'AEl: fraction', ... with mass number A 
+  ! and element symbol El. The quotes are optional and the entries are separated by commas and/or spaces.
+  SUBROUTINE ReadIsot(File, FirstValue, NextLine, GotNext)
+    INTEGER, INTENT(IN) :: File
+    CHARACTER(*), INTENT(IN) :: FirstValue
+    CHARACTER(*), INTENT(OUT) :: NextLine
+    LOGICAL, INTENT(OUT) :: GotNext
+
+    INTEGER :: Ios
+    INTEGER, ALLOCATABLE :: Zs(:), As(:)
+    REAL(8), ALLOCATABLE :: Fs(:)
+    CHARACTER(1024) :: Str1, Key, Val
+    LOGICAL :: HasEq, FirstLine, GotEnd
+
+    NextLine = ''
+    GotNext = .FALSE.
+    FirstLine = .TRUE.
+    ALLOCATE(Zs(0), As(0), Fs(0))
+
+    ! Start with FirstValue, if present
+    Str1 = FirstValue
+
+    DO
+      ! On subsequent iterations, read a new line
+      IF (.NOT. FirstLine) THEN
+        CALL ReadLine(File, Str1, Ios)
+        IF (Ios /= 0) EXIT
+
+        ! Check if this is a new keyword line
+        CALL ParseKeyValue(Str1, Key, Val, HasEq)
+        IF (HasEq .AND. LEN_TRIM(Key) > 0) THEN
+          NextLine = Str1
+          GotNext = .TRUE.
+          EXIT
+        END IF
+
+        ! Skip pure comment lines
+        IF (LEN_TRIM(Val) == 0 .AND. LEN_TRIM(Str1) > 0) THEN
+          IF (INDEX(ADJUSTL(Str1), '#') == 1 .OR. INDEX(ADJUSTL(Str1), '!') == 1) CYCLE
+        END IF
+
+        ! Check for empty line (end of isotope block)
+        IF (LEN_TRIM(Str1) == 0) EXIT
+      END IF
+      FirstLine = .FALSE.
+
+      ! Strip inline comments
+      CALL StripInlineComment(Str1)
+
+      ! Parse all isotope entries on this line; stop at 'END'
+      CALL ParseIsot(Str1, Zs, As, Fs, GotEnd)
+      IF (GotEnd) EXIT
+    END DO
+
+    ! Set the fractions of the whole block
+    IF (SIZE(Zs) > 0) CALL SetIsotFrac(Zs, As, Fs)
+  END SUBROUTINE ReadIsot
+
+  ! Parse a string of isotope entries 'AEl: fraction'
+  SUBROUTINE ParseIsot(Str, Zs, As, Fs, GotEnd)
+    USE Constants, ONLY: Elemen
+    CHARACTER(*), INTENT(IN) :: Str
+    INTEGER, ALLOCATABLE, INTENT(INOUT) :: Zs(:), As(:)
+    REAL(8), ALLOCATABLE, INTENT(INOUT) :: Fs(:)
+    LOGICAL, INTENT(OUT) :: GotEnd
+
+    INTEGER :: i, i1, i2, k, m, n, p, nd, iz, ia, Ios
+    REAL(8) :: F
+    CHARACTER(LEN(Str)) :: S, T
+    CHARACTER(64) :: Tok, Left
+
+    GotEnd = .FALSE.
+
+    ! Quotes and commas only separate the entries
+    S = Str
+    DO i = 1, LEN_TRIM(S)
+      IF (S(i:i) == '''' .OR. S(i:i) == '"' .OR. S(i:i) == ',') S(i:i) = ' '
+    END DO
+
+    ! Drop the blanks around the colons, so that every entry is one blank-free token
+    T = ' '
+    m = 0
+    n = LEN_TRIM(S)
+    DO i = 1, n
+      IF (S(i:i) == ' ') THEN
+        IF (m > 0) THEN
+          IF (T(m:m) == ':') CYCLE
+        END IF
+        k = VERIFY(S(i+1:n), ' ')
+        IF (k > 0) THEN
+          IF (S(i+k:i+k) == ':') CYCLE
+        END IF
+      END IF
+      m = m + 1
+      T(m:m) = S(i:i)
+    END DO
+
+    ! Parse the blank-separated entries
+    n = LEN_TRIM(T)
+    i1 = 1
+    DO WHILE (i1 <= n)
+
+      ! Skip the blanks separating the entries
+      IF (T(i1:i1) == ' ') THEN
+        i1 = i1 + 1
+        CYCLE
+      END IF
+
+      ! Extract the entry, guarding against a runaway malformed one
+      i2 = INDEX(T(i1:n), ' ')
+      IF (i2 == 0) THEN
+        i2 = n
+      ELSE
+        i2 = i1 + i2 - 2
+      END IF
+      IF (i2 - i1 + 1 > LEN(Tok)) CALL ErrStop('ParseIsot: isotope entry is too long: ' // T(i1:i2))
+      Tok = T(i1:i2)
+      i1 = i2 + 1
+
+      ! Stop if 'END' is encountered
+      IF (UpperCase(TRIM(Tok)) == 'END') THEN
+        GotEnd = .TRUE.
+        RETURN
+      END IF
+
+      ! Mass number (one to three digits) and element symbol before the colon
+      p = INDEX(Tok, ':')
+      IF (p <= 1) CALL ErrStop('ParseIsot: invalid isotope entry: ' // TRIM(Tok))
+      Left = UpperCase(Tok(1:p-1))
+      nd = VERIFY(TRIM(Left), '0123456789') - 1
+      IF (nd < 1 .OR. nd > 3 .OR. LEN_TRIM(Left) - nd < 1 .OR. LEN_TRIM(Left) - nd > 2) &
+        CALL ErrStop('ParseIsot: invalid isotope name in entry: ' // TRIM(Tok))
+      READ(Left(1:nd), *) ia
+      iz = 0
+      DO k = 1, SIZE(Elemen)
+        IF (TRIM(Left(nd+1:)) == UpperCase(TRIM(Elemen(k)))) iz = k
+      END DO
+      IF (iz == 0) CALL ErrStop('ParseIsot: unknown element in isotope entry: ' // TRIM(Tok))
+
+      ! Fraction after the colon
+      IF (LEN_TRIM(Tok(p+1:)) == 0) CALL ErrStop('ParseIsot: missing fraction in isotope entry: ' // TRIM(Tok))
+      READ(Tok(p+1:), *, IOSTAT=Ios) F
+      IF (Ios /= 0) CALL ErrStop('ParseIsot: invalid fraction in isotope entry: ' // TRIM(Tok))
+
+      Zs = [Zs, iz]
+      As = [As, ia]
+      Fs = [Fs, F]
+    END DO
+  END SUBROUTINE ParseIsot
 
   ! Remove up to two leading digits from a molecule tag (e.g., '46TiO' -> 'TiO')
   FUNCTION StripIsotope(Tag) RESULT(Name)
@@ -818,21 +1003,7 @@ CONTAINS
     
   END SUBROUTINE MergeShifts
 
-  ! Convert vacuum wavelengths [Angstrom] to air [Angstrom]; GPT-5
-  FUNCTION Vac2Air1(LambdaVac) RESULT(LambdaAir)
-    REAL(8), INTENT(IN) :: LambdaVac(:)
-    REAL(8) :: LambdaAir(SIZE(LambdaVac))
-    REAL(8) :: S(SIZE(LambdaVac))
-    REAL(8) :: S2(SIZE(LambdaVac))
-    REAL(8) :: N(SIZE(LambdaVac))
-
-    S  = 1.0D4 / LambdaVac
-    S2 = S * S
-    N = 1.0D0 + 1.0D-8 * ( 8342.13D0 + 2406030.D0 / (130.D0 - S2) + 15997.D0 / (38.9D0 - S2) )
-    LambdaAir = LambdaVac / N
-  END FUNCTION Vac2Air1
-
-  ! Convert vacuum wavelengths [Angstrom] to air [Angstrom]; SME
+  ! Convert vacuum wavelengths [Angstrom] to air [Angstrom] (Birch & Downs 1994)
   ELEMENTAL FUNCTION Vac2Air(LambdaVac) RESULT(LambdaAir)
     REAL(8), INTENT(IN) :: LambdaVac
     REAL(8) :: LambdaAir, S, S2, N
@@ -841,13 +1012,11 @@ CONTAINS
     mask = (LambdaVac > 2000.0D0)
     S  = 1d4 / LambdaVac
     S2 = S * S
-    N = 1d0 + 8.336624212083d-5 + &
-              2.408926869968d-2 / (1.301065924522d2 - S2) + &
-              1.599740894897d-4 / (3.892568793293d1 - S2)
+    N = 1d0 + 8.34254d-5 + 2.406147d-2 / (130d0 - S2) + 1.5998d-4 / (38.9d0 - S2)
     LambdaAir = MERGE(LambdaVac / N, LambdaVac, mask)
   END FUNCTION Vac2Air
 
-  ! Convert air wavelengths [Angstrom] to vacuum [Angstrom]; SME
+  ! Convert air wavelengths [Angstrom] to vacuum [Angstrom]
   ELEMENTAL FUNCTION Air2Vac(LambdaAir) RESULT(LambdaVac)
     REAL(8), INTENT(IN) :: LambdaAir
     REAL(8) :: LambdaVac, S, S2, N
@@ -862,322 +1031,57 @@ CONTAINS
     LambdaVac = MERGE(LambdaAir * N, LambdaAir, mask)
   END FUNCTION Air2Vac
 
-  ! Compute the product of isotopic fractions for TS style string TSid
-  FUNCTION GetIsot(TSid) RESULT(isot)
+  ! Fill the isotopic fraction table IsotFrac(Z, A) with the reference fractions;
+  ! isotopes absent from the reference list get zero
+  SUBROUTINE InitIsotFrac
+    USE Constants, ONLY: NisoRef, IsoRefZ, IsoRefA, IsoRefFrac
+    USE AtmosData, ONLY: IsotFrac
+    INTEGER :: k
+
+    IsotFrac = 0d0
+    DO k = 1, NisoRef
+      IsotFrac(IsoRefZ(k), IsoRefA(k)) = IsoRefFrac(k)
+    END DO
+
+  END SUBROUTINE InitIsotFrac
+
+  ! Compute the product of isotopic fractions from the table IsotFrac for TS style string
+  ! TSid, or return the explicit isotopic factor given as a decimal number with one digit
+  ! before the point
+  FUNCTION GetIsot(TSid) RESULT(Isot)
+    USE Constants, ONLY: IsoRefZ, IsoRefA
+    USE AtmosData, ONLY: IsotFrac
     CHARACTER(*), INTENT(IN) :: TSid
-    REAL(8) :: isot
-    INTEGER :: p, la, li, natom, i, i0, j0, iz, ia
+    INTEGER :: p, la, li, natom, i, i0, j0, iz, ia, ios
+    REAL(8) :: Isot
     CHARACTER(2) :: atom1
     CHARACTER(3) :: isot1
 
-    ! Large table of isotopic fractions; index (Z, A)
-    REAL(8), ALLOCATABLE :: isotopfrac(:,:)
-
     ! Split the input string into the atom and isotope sections
     p = INDEX(TSid, '.')
-    IF (p == 0) STOP 'Failure in isotopic extraction: missing ''.'' in TSid ' // TSid
+    IF (p == 0) CALL ErrStop('Failure in isotopic extraction: missing ''.'' in TSid ' // TRIM(TSid))
     la = p - 1
     li = LEN_TRIM(TSid) - p
 
+    ! One digit before the point marks an explicit isotopic factor
+    IF (la == 1) THEN
+      IF (VERIFY(TSid(1:1), '0123456789') /= 0 .OR. VERIFY(TRIM(TSid(p+1:)), '0123456789') /= 0) &
+        CALL ErrStop('Failure in isotopic extraction: invalid isotopic factor ' // TRIM(TSid))
+      READ(TSid, *, IOSTAT=ios) Isot
+      IF (ios /= 0) CALL ErrStop('Failure in isotopic extraction: invalid isotopic factor ' // TRIM(TSid))
+      IF (Isot < 0d0 .OR. Isot > 1d0) &
+        CALL ErrStop('Failure in isotopic extraction: isotopic factor outside [0,1] ' // TRIM(TSid))
+      RETURN
+    END IF
+
     ! Validate basic lengths and derive number of atoms
-    IF (MOD(li, 3) /= 0) STOP 'Failure in isotopic extraction: isot_id length not divisible by 3 ' // TSid
+    IF (MOD(li, 3) /= 0) CALL ErrStop('Failure in isotopic extraction: isot_id length not divisible by 3 ' // TRIM(TSid))
     natom = li / 3
-    IF (MOD(la, 2) /= 0) STOP 'Failure in isotopic extraction: atom_id length not divisible by 2 ' // TSid
-    IF (la /= 2 * natom) STOP 'Failure in isotopic extraction: atom/isotope counts are inconsistent ' // TSid
-
-    ! Allocate and initialize the isotopic fraction table
-    ALLOCATE(isotopfrac(100, 250))
-    isotopfrac = 1.0D0
-
-    ! Load known isotopic fractions 
-    isotopfrac(1, 1) = 0.999966d0
-    isotopfrac(1, 2) = 0.000034d0
-    isotopfrac(2, 3) = 0.000142d0
-    isotopfrac(2, 4) = 0.999858d0
-    isotopfrac(3, 6) = 0.075d0
-    isotopfrac(3, 7) = 0.925d0
-    isotopfrac(4, 9) = 1.0d0
-    isotopfrac(5, 10) = 0.199d0
-    isotopfrac(5, 11) = 0.801d0
-    isotopfrac(6, 12) = 0.9890d0
-    isotopfrac(6, 13) = 0.0110d0
-    isotopfrac(7, 14) = 0.99634d0
-    isotopfrac(7, 15) = 0.00366d0
-    isotopfrac(8, 16) = 0.99762d0
-    isotopfrac(8, 17) = 0.00038d0
-    isotopfrac(8, 18) = 0.00200d0
-    isotopfrac(9, 19) = 1.00d0
-    isotopfrac(10, 20) = 0.9299d0
-    isotopfrac(10, 21) = 0.00226d0
-    isotopfrac(10, 22) = 0.0679d0
-    isotopfrac(11, 23) = 1.00d0
-    isotopfrac(12, 24) = 0.7899d0
-    isotopfrac(12, 25) = 0.1000d0
-    isotopfrac(12, 26) = 0.1101d0
-    isotopfrac(13, 27) = 1.00d0
-    isotopfrac(14, 28) = 0.9223d0
-    isotopfrac(14, 29) = 0.0467d0
-    isotopfrac(14, 30) = 0.0310d0
-    isotopfrac(15, 31) = 1.00d0
-    isotopfrac(16, 32) = 0.9502d0
-    isotopfrac(16, 33) = 0.0075d0
-    isotopfrac(16, 34) = 0.0421d0
-    isotopfrac(16, 36) = 0.0002d0
-    isotopfrac(17, 35) = 0.7577d0
-    isotopfrac(17, 37) = 0.2423d0
-    isotopfrac(18, 36) = 0.842d0
-    isotopfrac(18, 38) = 0.158d0
-    isotopfrac(19, 39) = 0.932581d0
-    isotopfrac(19, 40) = 0.0001167d0
-    isotopfrac(19, 41) = 0.067302d0
-    isotopfrac(20, 40) = 0.96941d0
-    isotopfrac(20, 42) = 0.00647d0
-    isotopfrac(20, 43) = 0.00135d0
-    isotopfrac(20, 44) = 0.02086d0
-    isotopfrac(20, 46) = 0.00004d0
-    isotopfrac(20, 48) = 0.00187d0
-    isotopfrac(21, 45) = 1.00d0
-    isotopfrac(22, 46) = 0.080d0
-    isotopfrac(22, 47) = 0.073d0
-    isotopfrac(22, 48) = 0.738d0
-    isotopfrac(22, 49) = 0.055d0
-    isotopfrac(22, 50) = 0.054d0
-    isotopfrac(23, 50) = 0.00250d0
-    isotopfrac(23, 51) = 0.99750d0
-    isotopfrac(24, 50) = 0.04345d0
-    isotopfrac(24, 52) = 0.83789d0
-    isotopfrac(24, 53) = 0.09501d0
-    isotopfrac(24, 54) = 0.02365d0
-    isotopfrac(25, 55) = 1.00d0
-    isotopfrac(26, 54) = 0.058d0
-    isotopfrac(26, 56) = 0.9172d0
-    isotopfrac(26, 57) = 0.022d0
-    isotopfrac(26, 58) = 0.0028d0
-    isotopfrac(27, 59) = 1.00d0
-    isotopfrac(28, 58) = 0.6827d0
-    isotopfrac(28, 60) = 0.2610d0
-    isotopfrac(28, 61) = 0.0113d0
-    isotopfrac(28, 62) = 0.0359d0
-    isotopfrac(28, 64) = 0.0091d0
-    isotopfrac(29, 63) = 0.6917d0
-    isotopfrac(29, 65) = 0.3083d0
-    isotopfrac(30, 64) = 0.4863d0
-    isotopfrac(30, 66) = 0.2790d0
-    isotopfrac(30, 67) = 0.0410d0
-    isotopfrac(30, 68) = 0.1875d0
-    isotopfrac(30, 70) = 0.0062d0
-    isotopfrac(31, 69) = 0.60108d0
-    isotopfrac(31, 71) = 0.39892d0
-    isotopfrac(32, 70) = 0.205d0
-    isotopfrac(32, 72) = 0.274d0
-    isotopfrac(32, 73) = 0.078d0
-    isotopfrac(32, 74) = 0.365d0
-    isotopfrac(32, 76) = 0.078d0
-    isotopfrac(33, 75) = 1.00d0
-    isotopfrac(34, 74) = 0.0088d0
-    isotopfrac(34, 76) = 0.090d0
-    isotopfrac(34, 77) = 0.076d0
-    isotopfrac(34, 78) = 0.236d0
-    isotopfrac(34, 80) = 0.497d0
-    isotopfrac(34, 82) = 0.092d0
-    isotopfrac(35, 79) = 0.5069d0
-    isotopfrac(35, 81) = 0.4931d0
-    isotopfrac(36, 78) = 0.00339d0
-    isotopfrac(36, 80) = 0.0222d0
-    isotopfrac(36, 82) = 0.1145d0
-    isotopfrac(36, 83) = 0.1147d0
-    isotopfrac(36, 84) = 0.5711d0
-    isotopfrac(36, 86) = 0.1742d0
-    isotopfrac(37, 85) = 0.72165d0
-    isotopfrac(37, 87) = 0.27835d0
-    isotopfrac(38, 84) = 0.0056d0
-    isotopfrac(38, 86) = 0.0986d0
-    isotopfrac(38, 87) = 0.0700d0
-    isotopfrac(38, 88) = 0.8258d0
-    isotopfrac(39, 89) = 1.00d0
-    isotopfrac(40, 90) = 0.5145d0
-    isotopfrac(40, 91) = 0.1122d0
-    isotopfrac(40, 92) = 0.1715d0
-    isotopfrac(40, 94) = 0.1738d0
-    isotopfrac(40, 96) = 0.0280d0
-    isotopfrac(41, 93) = 1.00d0
-    isotopfrac(42, 92) = 0.1484d0
-    isotopfrac(42, 94) = 0.0925d0
-    isotopfrac(42, 95) = 0.1592d0
-    isotopfrac(42, 96) = 0.1668d0
-    isotopfrac(42, 97) = 0.0955d0
-    isotopfrac(42, 98) = 0.2413d0
-    isotopfrac(42, 100) = 0.0963d0
-    isotopfrac(44, 96) = 0.0552d0
-    isotopfrac(44, 98) = 0.0188d0
-    isotopfrac(44, 99) = 0.127d0
-    isotopfrac(44, 100) = 0.126d0
-    isotopfrac(44, 101) = 0.170d0
-    isotopfrac(44, 102) = 0.316d0
-    isotopfrac(44, 104) = 0.187d0
-    isotopfrac(45, 103) = 1.00d0
-    isotopfrac(46, 102) = 0.01020d0
-    isotopfrac(46, 104) = 0.1114d0
-    isotopfrac(46, 105) = 0.2233d0
-    isotopfrac(46, 106) = 0.2733d0
-    isotopfrac(46, 108) = 0.2646d0
-    isotopfrac(46, 110) = 0.1172d0
-    isotopfrac(47, 107) = 0.51839d0
-    isotopfrac(47, 109) = 0.48161d0
-    isotopfrac(48, 106) = 0.0125d0
-    isotopfrac(48, 108) = 0.0089d0
-    isotopfrac(48, 110) = 0.1249d0
-    isotopfrac(48, 111) = 0.1280d0
-    isotopfrac(48, 112) = 0.2413d0
-    isotopfrac(48, 113) = 0.1222d0
-    isotopfrac(48, 114) = 0.2873d0
-    isotopfrac(48, 116) = 0.0749d0
-    isotopfrac(49, 113) = 0.043d0
-    isotopfrac(49, 115) = 0.957d0
-    isotopfrac(50, 112) = 0.00973d0
-    isotopfrac(50, 114) = 0.00659d0
-    isotopfrac(50, 115) = 0.00339d0
-    isotopfrac(50, 116) = 0.14538d0
-    isotopfrac(50, 117) = 0.07672d0
-    isotopfrac(50, 118) = 0.24217d0
-    isotopfrac(50, 119) = 0.08587d0
-    isotopfrac(50, 120) = 0.32596d0
-    isotopfrac(50, 122) = 0.04632d0
-    isotopfrac(50, 124) = 0.05787d0
-    isotopfrac(51, 121) = 0.57362d0
-    isotopfrac(51, 123) = 0.42638d0
-    isotopfrac(52, 120) = 0.0009d0
-    isotopfrac(52, 122) = 0.0257d0
-    isotopfrac(52, 123) = 0.0089d0
-    isotopfrac(52, 124) = 0.0476d0
-    isotopfrac(52, 125) = 0.0710d0
-    isotopfrac(52, 126) = 0.1889d0
-    isotopfrac(52, 128) = 0.3173d0
-    isotopfrac(52, 130) = 0.3397d0
-    isotopfrac(53, 127) = 1.00d0
-    isotopfrac(54, 124) = 0.00121d0
-    isotopfrac(54, 126) = 0.00108d0
-    isotopfrac(54, 128) = 0.0219d0
-    isotopfrac(54, 129) = 0.2734d0
-    isotopfrac(54, 130) = 0.0435d0
-    isotopfrac(54, 131) = 0.2169d0
-    isotopfrac(54, 132) = 0.2650d0
-    isotopfrac(54, 134) = 0.0976d0
-    isotopfrac(54, 136) = 0.0794d0
-    isotopfrac(55, 133) = 1.00d0
-    isotopfrac(56, 130) = 0.00106d0
-    isotopfrac(56, 132) = 0.00101d0
-    isotopfrac(56, 134) = 0.02417d0
-    isotopfrac(56, 135) = 0.06592d0
-    isotopfrac(56, 136) = 0.07854d0
-    isotopfrac(56, 137) = 0.1123d0
-    isotopfrac(56, 138) = 0.7170d0
-    isotopfrac(57, 138) = 0.00089d0
-    isotopfrac(57, 139) = 0.99911d0
-    isotopfrac(58, 136) = 0.0019d0
-    isotopfrac(58, 138) = 0.0025d0
-    isotopfrac(58, 140) = 0.8848d0
-    isotopfrac(58, 142) = 0.1108d0
-    isotopfrac(59, 141) = 1.00d0
-    isotopfrac(60, 142) = 0.2713d0
-    isotopfrac(60, 143) = 0.1218d0
-    isotopfrac(60, 144) = 0.2380d0
-    isotopfrac(60, 145) = 0.0830d0
-    isotopfrac(60, 146) = 0.1719d0
-    isotopfrac(60, 148) = 0.0576d0
-    isotopfrac(60, 150) = 0.0564d0
-    isotopfrac(62, 144) = 0.031d0
-    isotopfrac(62, 147) = 0.150d0
-    isotopfrac(62, 148) = 0.113d0
-    isotopfrac(62, 149) = 0.138d0
-    isotopfrac(62, 150) = 0.074d0
-    isotopfrac(62, 152) = 0.267d0
-    isotopfrac(62, 154) = 0.227d0
-    isotopfrac(63, 151) = 0.478d0
-    isotopfrac(63, 153) = 0.522d0
-    isotopfrac(64, 152) = 0.0020d0
-    isotopfrac(64, 154) = 0.0218d0
-    isotopfrac(64, 155) = 0.1480d0
-    isotopfrac(64, 156) = 0.2047d0
-    isotopfrac(64, 157) = 0.1565d0
-    isotopfrac(64, 158) = 0.2484d0
-    isotopfrac(64, 160) = 0.2186d0
-    isotopfrac(65, 159) = 1.00d0
-    isotopfrac(66, 156) = 0.00056d0
-    isotopfrac(66, 158) = 0.00096d0
-    isotopfrac(66, 160) = 0.0234d0
-    isotopfrac(66, 161) = 0.1891d0
-    isotopfrac(66, 162) = 0.2551d0
-    isotopfrac(66, 163) = 0.2490d0
-    isotopfrac(66, 164) = 0.2819d0
-    isotopfrac(67, 165) = 1.00d0
-    isotopfrac(68, 162) = 0.0014d0
-    isotopfrac(68, 164) = 0.0161d0
-    isotopfrac(68, 166) = 0.336d0
-    isotopfrac(68, 167) = 0.2295d0
-    isotopfrac(68, 168) = 0.268d0
-    isotopfrac(68, 170) = 0.149d0
-    isotopfrac(69, 169) = 1.00d0
-    isotopfrac(70, 168) = 0.0013d0
-    isotopfrac(70, 170) = 0.0305d0
-    isotopfrac(70, 171) = 0.143d0
-    isotopfrac(70, 172) = 0.219d0
-    isotopfrac(70, 173) = 0.1612d0
-    isotopfrac(70, 174) = 0.318d0
-    isotopfrac(70, 176) = 0.127d0
-    isotopfrac(71, 175) = 0.9741d0
-    isotopfrac(71, 176) = 0.0259d0
-    isotopfrac(72, 174) = 0.00162d0
-    isotopfrac(72, 176) = 0.05206d0
-    isotopfrac(72, 177) = 0.18606d0
-    isotopfrac(72, 178) = 0.27297d0
-    isotopfrac(72, 179) = 0.13629d0
-    isotopfrac(72, 180) = 0.35100d0
-    isotopfrac(73, 180) = 0.00012d0
-    isotopfrac(73, 181) = 0.99988d0
-    isotopfrac(74, 180) = 0.0013d0
-    isotopfrac(74, 182) = 0.263d0
-    isotopfrac(74, 183) = 0.143d0
-    isotopfrac(74, 184) = 0.3067d0
-    isotopfrac(74, 186) = 0.286d0
-    isotopfrac(75, 185) = 0.3740d0
-    isotopfrac(75, 187) = 0.6260d0
-    isotopfrac(76, 184) = 0.00018d0
-    isotopfrac(76, 186) = 0.0158d0
-    isotopfrac(76, 187) = 0.016d0
-    isotopfrac(76, 188) = 0.133d0
-    isotopfrac(76, 189) = 0.161d0
-    isotopfrac(76, 190) = 0.264d0
-    isotopfrac(76, 192) = 0.410d0
-    isotopfrac(77, 191) = 0.373d0
-    isotopfrac(77, 193) = 0.627d0
-    isotopfrac(78, 190) = 0.000127d0
-    isotopfrac(78, 192) = 0.0078d0
-    isotopfrac(78, 194) = 0.329d0
-    isotopfrac(78, 195) = 0.338d0
-    isotopfrac(78, 196) = 0.252d0
-    isotopfrac(78, 198) = 0.0719d0
-    isotopfrac(79, 197) = 1.00d0
-    isotopfrac(80, 196) = 0.001534d0
-    isotopfrac(80, 198) = 0.09968d0
-    isotopfrac(80, 199) = 0.16873d0
-    isotopfrac(80, 200) = 0.23096d0
-    isotopfrac(80, 201) = 0.13181d0
-    isotopfrac(80, 202) = 0.29863d0
-    isotopfrac(80, 204) = 0.06865d0
-    isotopfrac(81, 203) = 0.29524d0
-    isotopfrac(81, 205) = 0.70476d0
-    isotopfrac(82, 204) = 0.0194d0
-    isotopfrac(82, 206) = 0.1912d0
-    isotopfrac(82, 207) = 0.2062d0
-    isotopfrac(82, 208) = 0.5831d0
-    isotopfrac(83, 209) = 1.00d0
-    isotopfrac(90, 232) = 1.00d0
-    isotopfrac(92, 235) = 0.007200d0
-    isotopfrac(92, 238) = 0.992745d0
+    IF (MOD(la, 2) /= 0) CALL ErrStop('Failure in isotopic extraction: atom_id length not divisible by 2 ' // TRIM(TSid))
+    IF (la /= 2 * natom) CALL ErrStop('Failure in isotopic extraction: atom/isotope counts are inconsistent ' // TRIM(TSid))
 
     ! Initialize the result
-    isot = 1.0D0
+    Isot = 1.0D0
 
     ! Traverse each atom and multiply the corresponding isotopic fraction
     i0 = 0
@@ -1191,15 +1095,21 @@ CONTAINS
 
       ! Skip if isotope code is '000'
       IF (isot1 .NE. '000') THEN
-        READ(atom1, '(I2)') iz
-        READ(isot1, '(I3)') ia
+        READ(atom1, '(I2)', IOSTAT=ios) iz
+        IF (ios == 0) READ(isot1, '(I3)', IOSTAT=ios) ia
+        IF (ios /= 0) CALL ErrStop('Failure in isotopic extraction: invalid atom or isotope number ' // &
+          TRIM(TSid))
 
         ! Check bounds before lookup
-        IF (iz < 1 .OR. iz > 100 .OR. ia < 1 .OR. ia > 250) &
-          STOP 'Failure in isotopic extraction: index out of bounds ' // TSid
+        IF (iz < 1 .OR. iz > SIZE(IsotFrac, 1) .OR. ia < 1 .OR. ia > SIZE(IsotFrac, 2)) &
+          CALL ErrStop('Failure in isotopic extraction: index out of bounds ' // TRIM(TSid))
+
+        ! The isotope must be in the reference list
+        IF (.NOT. ANY(IsoRefZ == iz .AND. IsoRefA == ia)) &
+          CALL ErrStop('Failure in isotopic extraction: isotope not in the isotopic table ' // TRIM(TSid))
 
         ! Multiply by the isotopic fraction for (Z=iz, A=ia)
-        isot = isot * isotopfrac(iz, ia)
+        Isot = Isot * IsotFrac(iz, ia)
       END IF
 
       ! Advance substring offsets
@@ -1207,10 +1117,157 @@ CONTAINS
       i0 = i0 + 3
     END DO
 
-    ! Release the isotopic fraction table
-    DEALLOCATE(isotopfrac)
-
   END FUNCTION GetIsot
+
+  ! True if the fraction of any isotope in TS style string TSid differs from its reference
+  ! value, that is was changed with the ISOTOPE keyword
+  LOGICAL FUNCTION IsotChanged(TSid)
+    USE Constants, ONLY: NisoRef, IsoRefZ, IsoRefA, IsoRefFrac
+    USE AtmosData, ONLY: IsotFrac
+    CHARACTER(*), INTENT(IN) :: TSid
+    INTEGER :: p, natom, i, iz, ia, k, ios
+
+    IsotChanged = .FALSE.
+    p = INDEX(TSid, '.')
+    IF (p == 0) RETURN
+    natom = (LEN_TRIM(TSid) - p) / 3
+    IF (natom < 1 .OR. p - 1 /= 2 * natom) RETURN
+
+    ! Compare the fraction of every isotope of the code with its reference value
+    DO i = 1, natom
+      READ(TSid(2*i-1:2*i), '(I2)', IOSTAT=ios) iz
+      IF (ios /= 0) RETURN
+      READ(TSid(p+3*i-2:p+3*i), '(I3)', IOSTAT=ios) ia
+      IF (ios /= 0) RETURN
+      IF (ia == 0) CYCLE
+      DO k = 1, NisoRef
+        IF (IsoRefZ(k) == iz .AND. IsoRefA(k) == ia) THEN
+          IF (IsotFrac(iz, ia) /= IsoRefFrac(k)) IsotChanged = .TRUE.
+        END IF
+      END DO
+    END DO
+  END FUNCTION IsotChanged
+
+  ! Set the fractions Fs of the isotopes (Zs, As) in the table IsotFrac
+  SUBROUTINE SetIsotFrac(Zs, As, Fs)
+    USE Constants, ONLY: IsoRefZ, IsoRefA, Elemen
+    USE AtmosData, ONLY: IsotFrac
+    INTEGER, INTENT(IN) :: Zs(:), As(:)
+    REAL(8), INTENT(IN) :: Fs(:)
+
+    REAL(8), PARAMETER :: Tol = 1d-3
+    INTEGER :: j, m, k, iz
+    INTEGER, ALLOCATABLE :: Ael(:)
+    LOGICAL :: Done(SIZE(Zs))
+    LOGICAL, ALLOCATABLE :: Given(:)
+    REAL(8), ALLOCATABLE :: Fgiv(:), Fcur(:)
+    REAL(8) :: SumG, SumR
+    CHARACTER(256) :: Msg
+
+    ! Validate the entries: isotopes of the reference list with fractions in [0,1]
+    DO j = 1, SIZE(Zs)
+      IF (.NOT. ANY(IsoRefZ == Zs(j) .AND. IsoRefA == As(j))) THEN
+        WRITE(Msg, '(A, I0, A)') 'SetIsotFrac: isotope ', As(j), &
+          TRIM(Elemen(Zs(j))) // ' is not in the isotopic table'
+        CALL ErrStop(Msg)
+      END IF
+      IF (Fs(j) < 0d0 .OR. Fs(j) > 1d0) THEN
+        WRITE(Msg, '(A, I0, A, G0.6, A)') 'SetIsotFrac: fraction of ', As(j), &
+          TRIM(Elemen(Zs(j))) // ' is ', Fs(j), ', outside [0,1]'
+        CALL ErrStop(Msg)
+      END IF
+    END DO
+
+    ! Treat each element once, with all its entries
+    Done = .FALSE.
+    DO j = 1, SIZE(Zs)
+      IF (Done(j)) CYCLE
+      iz = Zs(j)
+
+      ! Isotopes of this element and their current fractions
+      Ael = PACK(IsoRefA, IsoRefZ == iz)
+      ALLOCATE(Given(SIZE(Ael)), Fgiv(SIZE(Ael)), Fcur(SIZE(Ael)))
+      Given = .FALSE.
+      Fgiv = 0d0
+      Fcur = IsotFrac(iz, Ael)
+
+      ! Fractions given for this element; a later entry for the same isotope wins
+      DO m = j, SIZE(Zs)
+        IF (Zs(m) /= iz) CYCLE
+        Done(m) = .TRUE.
+        k = FINDLOC(Ael, As(m), 1)
+        Given(k) = .TRUE.
+        Fgiv(k) = Fs(m)
+      END DO
+      SumG = SUM(Fgiv, MASK=Given)
+      SumR = SUM(Fcur, MASK=.NOT. Given)
+
+      ! The given fractions cannot exceed the whole element
+      IF (SumG > 1d0 + Tol) THEN
+        WRITE(Msg, '(A, F8.6, A)') 'SetIsotFrac: fractions given for ' // TRIM(Elemen(iz)) // &
+          ' sum to ', SumG, ', more than 1'
+        CALL ErrStop(Msg)
+      END IF
+
+      IF (ALL(Given)) THEN
+
+        ! All isotopes given: the sum must be 1 within Tol, then renormalise exactly
+        IF (ABS(SumG - 1d0) > Tol) THEN
+          WRITE(Msg, '(A, F8.6, A)') 'SetIsotFrac: fractions of all isotopes of ' // &
+            TRIM(Elemen(iz)) // ' sum to ', SumG, ' instead of 1'
+          CALL ErrStop(Msg)
+        END IF
+        Fcur = Fgiv / SumG
+
+      ELSE IF (SumG >= 1d0) THEN
+
+        ! The given isotopes take the whole element; the other ones get zero
+        Fcur = MERGE(Fgiv / SumG, 0d0, Given)
+
+      ELSE
+
+        ! The other isotopes share the remaining fraction in proportion to their current values
+        IF (SumR <= 0d0) THEN
+          WRITE(Msg, '(A, F8.6)') 'SetIsotFrac: the other isotopes of ' // TRIM(Elemen(iz)) // &
+            ' have zero fractions and cannot take up the remaining ', 1d0 - SumG
+          CALL ErrStop(Msg)
+        END IF
+        Fcur = MERGE(Fgiv, Fcur * (1d0 - SumG) / SumR, Given)
+
+      END IF
+
+      IsotFrac(iz, Ael) = Fcur
+      DEALLOCATE(Given, Fgiv, Fcur)
+    END DO
+  END SUBROUTINE SetIsotFrac
+
+  ! Print the isotopic fractions of every element whose fractions differ from the reference ones
+  SUBROUTINE ShowIsotFrac
+    USE Constants, ONLY: NisoRef, IsoRefZ, IsoRefA, IsoRefFrac, Elemen
+    USE AtmosData, ONLY: IsotFrac
+    INTEGER :: iz, k
+    LOGICAL :: Changed
+    CHARACTER(1024) :: Line
+    CHARACTER(32) :: Item
+
+    DO iz = 1, SIZE(Elemen)
+      Changed = .FALSE.
+      DO k = 1, NisoRef
+        IF (IsoRefZ(k) == iz) THEN
+          IF (IsotFrac(iz, IsoRefA(k)) /= IsoRefFrac(k)) Changed = .TRUE.
+        END IF
+      END DO
+      IF (.NOT. Changed) CYCLE
+
+      Line = ' Isotopic fractions of ' // TRIM(Elemen(iz)) // ':'
+      DO k = 1, NisoRef
+        IF (IsoRefZ(k) /= iz) CYCLE
+        WRITE(Item, '(I0, A, 1X, F8.6)') IsoRefA(k), TRIM(Elemen(iz)), IsotFrac(iz, IsoRefA(k))
+        Line = TRIM(Line) // ' ' // TRIM(Item)
+      END DO
+      WRITE(*, '(A)') TRIM(Line)
+    END DO
+  END SUBROUTINE ShowIsotFrac
 
   ! Limb angles and disk-integration weights for different quadratures
   SUBROUTINE MuQuadrature(Quad, N, X, W, R, SetNodes)
@@ -1374,7 +1431,7 @@ CONTAINS
   END SUBROUTINE LegendreP
 
   ! Integral of SQRT(R^2 - t^2) over t from 0 to V, with V clipped to [-R, R]: half the area
-  ! of the part of a disk of radius R between x = 0 and x = V (zero for R = 0)
+  ! of the part of a disk of radius R between x = 0 and x = V (zero for R = 0).
   PURE REAL(8) FUNCTION SemiArea(R, V) RESULT(A)
 
     REAL(8), INTENT(IN) :: R, V
@@ -1383,7 +1440,7 @@ CONTAINS
     A = 0d0
     IF (R <= 0d0) RETURN
     X = MAX(-R, MIN(R, V))
-    A = 0.5d0 * (X * SQRT(MAX(0d0, R * R - X * X)) + R * R * ASIN(X / R))
+    A = 0.5d0 * (X * SQRT(MAX(0d0, (R - X) * (R + X))) + R * R * ASIN(X / R))
 
   END FUNCTION SemiArea
 
