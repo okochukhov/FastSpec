@@ -1,5 +1,11 @@
 # Changelog
 
+## changes since release 1.2
+
+### Changed
+
+- Fixed the `h5open_f failed` error when reading HDF5 line lists with HDF5 library versions 1.10.10, 1.10.11, 1.12.3 and 1.14.0.
+
 ## release 1.2 - code version 3.4 - 2026-11-16
 
 ### Added
