@@ -151,8 +151,8 @@ MODULE Solver
         Dtau2 = Dtau * Dtau
         Idtau2 = 1.0D0 / Dtau2
 
-        ! terms of the RT-Bezier integral; limit 1d-3 as in Synth3/SME; J has 1d-2
-        IF (Dtau < 1D-3) THEN                ! Analytical expansion
+        ! terms of the RT-Bezier integral; optimal limit 5d-3
+        IF (Dtau < 5D-3) THEN                ! Analytical expansion
           Eps = 1D0 - Dtau + 0.5D0 * Dtau2 - Dtau2 * Dtau / 6D0 + Dtau2 * Dtau2 / 24D0
           Alpha = Dtau / 3D0 - Dtau2 / 12D0 + Dtau2 * Dtau / 60D0
           Beta  = Dtau / 3D0 - Dtau2 * 0.25D0 + Dtau2 * Dtau * 0.1D0
@@ -236,8 +236,8 @@ MODULE Solver
       Dtau2 = Dtau * Dtau
       Idtau2 = 1.0D0 / Dtau2
 
-      ! terms of the RT-Bezier integral; limit 1d-3 as in Synth3/SME; J has 1d-2
-      IF (Dtau < 1D-3) THEN                ! Analytical expansion
+      ! terms of the RT-Bezier integral; optimal limit 5d-3
+      IF (Dtau < 5D-3) THEN                ! Analytical expansion
         Eps = 1D0 - Dtau + 0.5D0 * Dtau2 - Dtau2 * Dtau / 6D0 + Dtau2 * Dtau2 / 24D0
         Alpha = Dtau / 3D0 - Dtau2 / 12D0 + Dtau2 * Dtau / 60D0
         Beta  = Dtau / 3D0 - Dtau2 * 0.25D0 + Dtau2 * Dtau * 0.1D0
@@ -353,8 +353,8 @@ MODULE Solver
         Dtau2 = Dtau * Dtau
         Idtau2 = 1d0 / Dtau2
 
-        ! Bezier integral coefficients (as in the scalar solver)
-        IF (Dtau < 1d-3) THEN
+        ! terms of the RT-Bezier integral; optimal limit 5d-3
+        IF (Dtau < 5d-3) THEN
           Eps = 1d0 - Dtau + 0.5d0 * Dtau2 - Dtau2 * Dtau / 6d0 + Dtau2 * Dtau2 / 24d0
           Alpha = Dtau / 3d0 - Dtau2 / 12d0 + Dtau2 * Dtau / 60d0
           Beta  = Dtau / 3d0 - Dtau2 * 0.25d0 + Dtau2 * Dtau * 0.1d0
@@ -497,8 +497,8 @@ MODULE Solver
         Dtau2 = Dtau * Dtau
         Idtau2 = 1d0 / Dtau2
 
-        ! Bezier integral coefficients (as in the scalar solver)
-        IF (Dtau < 1d-3) THEN
+        ! terms of the RT-Bezier integral; optimal limit 5d-3
+        IF (Dtau < 5d-3) THEN
           Eps = 1d0 - Dtau + 0.5d0 * Dtau2 - Dtau2 * Dtau / 6d0 + Dtau2 * Dtau2 / 24d0
           Alpha = Dtau / 3d0 - Dtau2 / 12d0 + Dtau2 * Dtau / 60d0
           Beta  = Dtau / 3d0 - Dtau2 * 0.25d0 + Dtau2 * Dtau * 0.1d0
